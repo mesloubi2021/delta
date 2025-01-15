@@ -28,8 +28,15 @@ pub fn parse_styles(opt: &cli::Opt) -> HashMap<String, Style> {
     make_misc_styles(opt, &mut styles);
 
     let mut resolved_styles = resolve_style_references(styles, opt);
-    resolved_styles.get_mut("minus-emph-style").unwrap().is_emph = true;
-    resolved_styles.get_mut("plus-emph-style").unwrap().is_emph = true;
+    resolved_styles
+        .get_mut("minus-emph-style")
+        .unwrap_or_else(|| panic!("minus-emph-style not found in resolved styles"))
+        .is_emph = true;
+
+    resolved_styles
+        .get_mut("plus-emph-style")
+        .unwrap_or_else(|| panic!("plus-emph-style not found in resolved styles"))
+        .is_emph = true;
     resolved_styles
 }
 
@@ -114,16 +121,15 @@ fn parse_as_reference_to_git_config(style_string: &str, opt: &cli::Opt) -> Style
     }
 }
 
-fn make_hunk_styles<'a>(opt: &'a cli::Opt, styles: &'a mut HashMap<&str, StyleReference>) {
-    let is_light_mode = opt.computed.is_light_mode;
+fn make_hunk_styles(opt: &cli::Opt, styles: &mut HashMap<&str, StyleReference>) {
+    let color_mode = opt.computed.color_mode;
     let true_color = opt.computed.true_color;
     let minus_style = style_from_str(
         &opt.minus_style,
         Some(Style::from_colors(
             None,
             Some(color::get_minus_background_color_default(
-                is_light_mode,
-                true_color,
+                color_mode, true_color,
             )),
         )),
         None,
@@ -136,8 +142,7 @@ fn make_hunk_styles<'a>(opt: &'a cli::Opt, styles: &'a mut HashMap<&str, StyleRe
         Some(Style::from_colors(
             None,
             Some(color::get_minus_emph_background_color_default(
-                is_light_mode,
-                true_color,
+                color_mode, true_color,
             )),
         )),
         None,
@@ -160,8 +165,7 @@ fn make_hunk_styles<'a>(opt: &'a cli::Opt, styles: &'a mut HashMap<&str, StyleRe
         Some(Style::from_colors(
             None,
             Some(color::get_minus_background_color_default(
-                is_light_mode,
-                true_color,
+                color_mode, true_color,
             )),
         )),
         None,
@@ -176,8 +180,7 @@ fn make_hunk_styles<'a>(opt: &'a cli::Opt, styles: &'a mut HashMap<&str, StyleRe
         Some(Style::from_colors(
             None,
             Some(color::get_plus_background_color_default(
-                is_light_mode,
-                true_color,
+                color_mode, true_color,
             )),
         )),
         None,
@@ -190,8 +193,7 @@ fn make_hunk_styles<'a>(opt: &'a cli::Opt, styles: &'a mut HashMap<&str, StyleRe
         Some(Style::from_colors(
             None,
             Some(color::get_plus_emph_background_color_default(
-                is_light_mode,
-                true_color,
+                color_mode, true_color,
             )),
         )),
         None,
@@ -214,8 +216,7 @@ fn make_hunk_styles<'a>(opt: &'a cli::Opt, styles: &'a mut HashMap<&str, StyleRe
         Some(Style::from_colors(
             None,
             Some(color::get_plus_background_color_default(
-                is_light_mode,
-                true_color,
+                color_mode, true_color,
             )),
         )),
         None,
@@ -590,8 +591,10 @@ mod tests {
     #[test]
     fn test_resolve_style_references_1() {
         let style_1 = Style::default();
-        let mut style_2 = Style::default();
-        style_2.is_syntax_highlighted = !style_1.is_syntax_highlighted;
+        let style_2 = style::Style {
+            is_syntax_highlighted: !style_1.is_syntax_highlighted,
+            ..Default::default()
+        };
 
         let edges: HashMap<&str, StyleReference> = [
             ("a", StyleReference::Style(style_1)),
@@ -613,8 +616,10 @@ mod tests {
     #[test]
     fn test_resolve_style_references_2() {
         let style_1 = Style::default();
-        let mut style_2 = Style::default();
-        style_2.is_syntax_highlighted = !style_1.is_syntax_highlighted;
+        let style_2 = style::Style {
+            is_syntax_highlighted: !style_1.is_syntax_highlighted,
+            ..Default::default()
+        };
 
         let edges: HashMap<&str, StyleReference> = [
             ("a", StyleReference::Reference("b".to_string())),

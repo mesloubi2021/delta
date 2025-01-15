@@ -8,6 +8,7 @@ mod tests {
     use crate::tests::ansi_test_utils::ansi_test_utils;
     use crate::tests::integration_test_utils;
     use crate::tests::integration_test_utils::DeltaTest;
+    use insta::assert_snapshot;
 
     #[test]
     fn test_added_file() {
@@ -96,6 +97,79 @@ mod tests {
     }
 
     #[test]
+    fn test_default_language_is_used_for_syntax_highlighting() {
+        // Note: default-language will be used for files with no extension, but also
+        // for files with an extension, but for which the language was not detected.
+        // Use color-only so that we can refer to the line numbers from the input diff.
+        let config = integration_test_utils::make_config_from_args(&[
+            "--color-only",
+            "--default-language",
+            "bash",
+        ]);
+        let output = integration_test_utils::run_delta(MODIFIED_BASH_AND_CSHARP_FILES, &config);
+        ansi_test_utils::assert_line_has_syntax_highlighted_substring(
+            &output,
+            12,
+            1,
+            "    rsync -avu --delete $src/ $dst",
+            "abc.bash",
+            State::HunkZero(DiffType::Unified, None),
+            &config,
+        );
+    }
+
+    #[test]
+    fn test_default_language_is_not_used_when_other_language_is_detected() {
+        // Use color-only so that we can refer to the line numbers from the input diff.
+        let config = integration_test_utils::make_config_from_args(&[
+            "--color-only",
+            "--default-language",
+            "bash",
+        ]);
+        let output = integration_test_utils::run_delta(MODIFIED_BASH_AND_CSHARP_FILES, &config);
+        ansi_test_utils::assert_line_has_syntax_highlighted_substring(
+            &output,
+            19,
+            1,
+            "        static void Main(string[] args)",
+            "abc.cs",
+            State::HunkZero(DiffType::Unified, None),
+            &config,
+        );
+    }
+
+    #[test]
+    fn test_full_filename_used_to_detect_language() {
+        let config = integration_test_utils::make_config_from_args(&[
+            "--color-only",
+            "--default-language",
+            "txt",
+        ]);
+        let output = integration_test_utils::run_delta(MODIFIED_DOCKER_AND_RS_FILES, &config);
+        let ansi = ansi::explain_ansi(&output, false);
+
+        // Ensure presence and absence of highlighting. Do not use `assert_line_has_syntax_highlighted_substring`
+        // because it uses the same code path as the one to be tested here.
+        let expected = r"(normal)diff --git a/Dockerfile b/Dockerfile
+index 0123456..1234567 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -0,0 +2 @@
+(normal 22)+(203)FROM(231) foo(normal)
+(normal 22)+(203)COPY(231) bar baz(normal)
+diff --git a/rs b/rs
+index 0123456..1234567 100644
+--- a/rs
++++ b/rs
+@@ -0,0 +2 @@
+(normal 22)+(231)fn foobar() -> i8 {(normal)
+(normal 22)+(231)    8(normal)
+(normal 22)+(231)}(normal)
+";
+        assert_eq!(expected, ansi);
+    }
+
+    #[test]
     fn test_diff_unified_two_files() {
         let config =
             integration_test_utils::make_config_from_args(&["--file-modified-label", "comparing:"]);
@@ -154,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_certain_bugs_are_not_present() {
-        for input in vec![
+        for input in [
             DIFF_EXHIBITING_PARSE_FILE_NAME_BUG,
             DIFF_EXHIBITING_STATE_MACHINE_PARSER_BUG,
             DIFF_EXHIBITING_TRUNCATION_BUG,
@@ -168,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_delta_paints_diff_when_there_is_unrecognized_initial_content() {
-        for input in vec![
+        for input in [
             DIFF_WITH_UNRECOGNIZED_PRECEDING_MATERIAL_1,
             DIFF_WITH_UNRECOGNIZED_PRECEDING_MATERIAL_2,
         ] {
@@ -237,26 +311,55 @@ mod tests {
 
     #[test]
     fn test_binary_files_differ() {
-        let config = integration_test_utils::make_config_from_args(&[]);
-        let output = integration_test_utils::run_delta(BINARY_FILES_DIFFER, &config);
-        let output = strip_ansi_codes(&output);
-        assert!(output.contains("Binary files a/foo and b/foo differ\n"));
+        let output = DeltaTest::with_args(&["--file-modified-label", "modified:"])
+            .with_input(BINARY_FILES_DIFFER)
+            .skip_header();
+
+        assert_snapshot!(output, @r###"
+
+        modified: foo (binary file)
+        ───────────────────────────────────────────
+        "###);
     }
 
     #[test]
     fn test_binary_file_added() {
-        let config = integration_test_utils::make_config_from_args(&[]);
-        let output = integration_test_utils::run_delta(BINARY_FILE_ADDED, &config);
-        let output = strip_ansi_codes(&output);
-        assert!(output.contains("added: foo (binary file)\n"));
+        let output = DeltaTest::with_args(&[])
+            .with_input(BINARY_FILE_ADDED)
+            .skip_header();
+        assert_snapshot!(output, @r###"
+
+        added: foo (binary file)
+        ───────────────────────────────────────────
+        "###);
     }
 
     #[test]
     fn test_binary_file_removed() {
-        let config = integration_test_utils::make_config_from_args(&[]);
-        let output = integration_test_utils::run_delta(BINARY_FILE_REMOVED, &config);
-        let output = strip_ansi_codes(&output);
-        assert!(output.contains("removed: foo (binary file)\n"));
+        let output = DeltaTest::with_args(&[])
+            .with_input(BINARY_FILE_REMOVED)
+            .skip_header();
+        assert_snapshot!(output, @r###"
+
+        removed: foo (binary file)
+        ───────────────────────────────────────────
+        "###);
+    }
+
+    #[test]
+    fn test_binary_files_differ_after_other() {
+        let output = DeltaTest::with_args(&["--file-modified-label", "modified:"])
+            .with_input(BINARY_FILES_DIFFER_AFTER_OTHER)
+            .output;
+        assert_snapshot!(output, @r###"
+
+
+        renamed: foo ⟶   bar
+        ───────────────────────────────────────────
+
+        modified: qux (binary file)
+        ───────────────────────────────────────────
+        "###);
     }
 
     #[test]
@@ -266,6 +369,32 @@ mod tests {
         let output = strip_ansi_codes(&output);
         assert!(output.contains("\n---\n"));
         assert!(output.contains("\nSubject: [PATCH] Init\n"));
+    }
+
+    #[test]
+    fn test_standalone_diff_files_are_identical() {
+        let diff = "Files foo and bar are identical\n";
+        let config = integration_test_utils::make_config_from_args(&[]);
+        let output = integration_test_utils::run_delta(diff, &config);
+        assert_eq!(strip_ansi_codes(&output), diff);
+    }
+
+    #[test]
+    fn test_standalone_diff_binary_files_differ() {
+        let diff = "Binary files foo and bar differ\n";
+        let config = integration_test_utils::make_config_from_args(&[]);
+        let output = integration_test_utils::run_delta(diff, &config);
+        assert_eq!(strip_ansi_codes(&output), diff);
+    }
+
+    #[test]
+    fn test_diff_no_index_binary_files_differ() {
+        let config = integration_test_utils::make_config_from_args(&[]);
+        let output = integration_test_utils::run_delta(DIFF_NO_INDEX_BINARY_FILES_DIFFER, &config);
+        assert_eq!(
+            strip_ansi_codes(&output),
+            "Binary files foo bar and sub dir/foo bar baz differ\n"
+        );
     }
 
     #[test]
@@ -411,6 +540,7 @@ commit 94907c0f136f46dc46ffae2dc92dca9af7eb7c2e
             "blue",
             "--commit-decoration-style",
             "blue box ul",
+            "--width=64",
         ]);
     }
 
@@ -533,6 +663,7 @@ commit 94907c0f136f46dc46ffae2dc92dca9af7eb7c2e │
             "raw",
             "--commit-decoration-style",
             "box ul",
+            "--width=64",
         ]);
         let output = integration_test_utils::run_delta(GIT_DIFF_SINGLE_HUNK, &config);
         ansi_test_utils::assert_line_has_no_color(
@@ -594,7 +725,7 @@ commit 94907c0f136f46dc46ffae2dc92dca9af7eb7c2e
             "omit",
         ]);
         let output = integration_test_utils::run_delta(GIT_DIFF_SINGLE_HUNK, &config);
-        for (i, line) in vec![
+        for (i, line) in [
             "diff --git a/src/align.rs b/src/align.rs",
             "index 8e37a9e..6ce4863 100644",
             "--- a/src/align.rs",
@@ -642,7 +773,7 @@ index 8e37a9e..6ce4863 100644
             GIT_DIFF_SINGLE_HUNK_WITH_ANSI_ESCAPE_SEQUENCES,
             &config,
         );
-        for (i, line) in vec![
+        for (i, line) in [
             "diff --git a/src/align.rs b/src/align.rs",
             "index 8e37a9e..6ce4863 100644",
             "--- a/src/align.rs",
@@ -1092,6 +1223,21 @@ src/delta.rs:1: │
     }
 
     #[test]
+    fn test_hunk_header_omit_code_fragment() {
+        let config = integration_test_utils::make_config_from_args(&[
+            "--hunk-header-style",
+            "line-number omit-code-fragment",
+            "--hunk-header-decoration-style",
+            "none",
+        ]);
+        let output = strip_ansi_codes(&integration_test_utils::run_delta(
+            GIT_DIFF_SINGLE_HUNK,
+            &config,
+        ));
+        assert!(output.contains("\n71: \n"));
+    }
+
+    #[test]
     fn test_hunk_header_style_colored_input_color_is_stripped_under_normal() {
         let config = integration_test_utils::make_config_from_args(&[
             "--hunk-header-style",
@@ -1367,7 +1513,7 @@ src/align.rs:71: impl<'a> Alignment<'a> { │
             11,
             4,
             "impl<'a> Alignment<'a> { ",
-            "rs",
+            "a.rs",
             State::HunkHeader(
                 DiffType::Unified,
                 ParsedHunkHeader::default(),
@@ -1703,7 +1849,7 @@ src/align.rs:71: impl<'a> Alignment<'a> { │
             12,
             1,
             "        for (i, x_i) in self.x.iter().enumerate() {",
-            "rs",
+            "align.rs",
             State::HunkZero(DiffType::Unified, None),
             &config,
         );
@@ -1723,6 +1869,15 @@ src/align.rs:71: impl<'a> Alignment<'a> { │
     fn test_git_diff_U0_is_unchanged_under_color_only() {
         let config = integration_test_utils::make_config_from_args(&["--color-only"]);
         let input = DIFF_WITH_TWO_ADDED_LINES_CREATED_BY_GIT_DIFF_U0;
+        let output = integration_test_utils::run_delta(input, &config);
+        let output = strip_ansi_codes(&output);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_git_diff_binary_is_unchanged_under_color_only() {
+        let config = integration_test_utils::make_config_from_args(&["--color-only"]);
+        let input = BINARY_FILES_DIFFER_BETWEEN_OTHER;
         let output = integration_test_utils::run_delta(input, &config);
         let output = strip_ansi_codes(&output);
         assert_eq!(output, input);
@@ -1837,6 +1992,149 @@ src/align.rs:71: impl<'a> Alignment<'a> { │
         DeltaTest::with_args(&[])
             .with_input(GIT_LOG_FILE_REMOVAL_IN_FIRST_COMMIT)
             .expect_after_header("#partial\n\nremoved: a");
+    }
+
+    #[test]
+    fn test_lines_with_syntax_width_limit() {
+        let result = DeltaTest::with_args(&[
+            "--max-line-length=42",
+            "--max-syntax-highlighting-length=18",
+        ])
+        .explain_ansi()
+        .with_input(GIT_DIFF_SINGLE_HUNK);
+        assert_snapshot!(result.output, @r###"
+        (normal)commit 94907c0f136f46dc46ffae2dc92dca9af7(reverse normal)→(normal)
+        Author: Dan Davison <dandavison7@gmail.co(reverse normal)→(normal)
+        Date:   Thu May 14 11:13:17 2020 -0400
+
+            rustfmt
+
+
+        (blue)src/align.rs(normal)
+        (blue)───────────────────────────────────────────(normal)
+
+        (blue)─────────────────────────────(blue)┐(normal)
+        (blue)71(normal):(231) (81)impl(231)<(203)'a(231)> (149)Alignmen(normal)t<'a> { (blue)│(normal)
+        (blue)─────────────────────────────(blue)┘(normal)
+
+        (231)        (203)for(231) (i, x_(normal)i) in self.x.iter().en→
+        (231)            (203)for(231) (j(normal), y_j) in self.y.iter(→
+        (normal 52)                let (left, diag, up) =(normal 124) ((normal)
+        (normal 52)                    self.index(i, j + 1(normal 124)),(normal)
+        (normal 52)                    self.index(i, j),(normal)
+        (normal 52)                    self.index(i + 1, j),(normal)
+        (normal 52)                );(normal)
+        (231 22)                le(normal 22)t (left, diag, up) =(normal)
+        (231 22)                  (normal 22)  (normal 28)((normal 22)self.index(i, j + 1(normal 28)→(normal)
+        (231)                le(normal)t candidates = [
+        (231)                  (normal)  Cell {
+        (231)                  (normal)      parent: left,
+        "###);
+    }
+
+    #[test]
+    fn test_lines_with_syntax_width_limit_wrapping() {
+        let result = DeltaTest::with_args(&[
+            "--side-by-side",
+            "--width=55",
+            "--wrap-max-lines=1",
+            "--max-line-length=10", // this gets ignored!
+            "--max-syntax-highlighting-length=22",
+        ])
+        .explain_ansi()
+        .with_input(GIT_DIFF_SINGLE_HUNK);
+
+        // eprintln!("{}", result.raw_output);
+        assert_snapshot!(result.output, @r###"
+        (normal)commit 94907c0f136f46dc46ffae2dc92dca9af7eb7c2e
+        Author: Dan Davison <dandavison7@gmail.com>
+        Date:   Thu May 14 11:13:17 2020 -0400
+
+            rustfmt
+
+
+        (blue)src/align.rs(normal)
+        (blue)───────────────────────────────────────────────────────(normal)
+
+        (blue)─────────────────────────────(blue)┐(normal)
+        (blue)71(normal):(231) (81)impl(231)<(203)'a(231)> (149)Alignment(231)<(203)'a(normal)> { (blue)│(normal)
+        (blue)─────────────────────────────(blue)┘(normal)
+
+        (blue)│(238) 71 (blue)│(231)        (203)for(231) (i, x_i)(blue)↵(blue) │(238) 71 (blue)│(231)        (203)for(231) (i, x_i)(blue)↵(normal)
+        (blue)│(238)    (blue)│(231) i(normal)n self.x.iter().en(reverse normal)→(blue) │(238)    (blue)│(231) i(normal)n self.x.iter().en(reverse normal)→(normal)
+        (blue)│(238) 72 (blue)│(231)            (203)for(231) (j, (blue)↵(blue) │(238) 72 (blue)│(231)            (203)for(231) (j, (blue)↵(normal)
+        (blue)│(238)    (blue)│(231)y_(normal)j) in self.y.iter((reverse normal)→(blue) │(238)    (blue)│(231)y_(normal)j) in self.y.iter((reverse normal)→(normal)
+        (blue)│(88) 73 (blue)│(231 52)                (81)let(231) (blue)↵(blue) │(28) 73 (blue)│(231 22)                (81)let(231) (blue)↵(normal)
+        (blue)│(88)    (blue)│(231 52)(l(normal 52)eft, diag, up) =(normal 124) ((normal 52) (blue) │(28)    (blue)│(231 22)(l(normal 22)eft, diag, up) =(normal)
+        (blue)│(88) 74 (blue)│(231 52)                    (blue)↵(blue) │(28) 74 (blue)│(231 22)                    (blue)↵(normal)
+        (blue)│(88)    (blue)│(231 52)se(normal 52)lf.index(i, j + 1),(blue) │(28)    (blue)│(231 28)((normal 22)s(normal 22)elf.index(i, j + 1(reverse normal)→(normal)
+        (blue)│(88) 75 (blue)│(231 52)                    (blue)↵(blue) │(28)    (blue)│(normal)
+        (blue)│(88)    (blue)│(231 52)se(normal 52)lf.index(i, j),(normal 52)    (blue) │(28)    (blue)│(normal)
+        (blue)│(88) 76 (blue)│(231 52)                    (blue)↵(blue) │(28)    (blue)│(normal)
+        (blue)│(88)    (blue)│(231 52)se(normal 52)lf.index(i + 1, j),(blue) │(28)    (blue)│(normal)
+        (blue)│(88) 77 (blue)│(231 52)                );(normal 52)   (blue) │(28)    (blue)│(normal)
+        (blue)│(238) 78 (blue)│(231)                (81)let(231) (blue)↵(blue) │(238) 75 (blue)│(231)                (81)let(231) (blue)↵(normal)
+        (blue)│(238)    (blue)│(231)ca(normal)ndidates = [       (blue) │(238)    (blue)│(231)ca(normal)ndidates = [
+        (blue)│(238) 79 (blue)│(231)                    (blue)↵(blue) │(238) 76 (blue)│(231)                    (blue)↵(normal)
+        (blue)│(238)    (blue)│(231)Ce(normal)ll {               (blue) │(238)    (blue)│(231)Ce(normal)ll {
+        (blue)│(238) 80 (blue)│(231)                    (blue)↵(blue) │(238) 77 (blue)│(231)                    (blue)↵(normal)
+        (blue)│(238)    (blue)│(231)  (normal)  parent: left,    (blue) │(238)    (blue)│(231)  (normal)  parent: left,
+        "###);
+    }
+
+    #[test]
+    fn test_lines_with_syntax_width_unicode() {
+        let result = DeltaTest::with_args(&["--max-syntax-highlighting-length=11"])
+            .explain_ansi()
+            .with_input(GIT_DIFF_ALL_UNICODE_W_FULLWIDTH);
+
+        assert_snapshot!(result.output, @r###"
+        (normal)
+
+        (blue)src/a(normal)
+        (blue)───────────────────────────────────────────(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)1(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (231)一æäöø€ÆÄÖ(normal)〇Øß一
+        (231)一æäöø€ÆÄÖ(normal)〇Øß一
+        (normal 52)二æäöø(normal 124)¢(normal 52)ÆÄÖ〇Øß二(normal)
+        (normal 52)二æäöø(normal 124)¢(normal 52)ÆÄÖ〇Øß二(normal)
+        (231 22)二æäöø(normal 28)€(normal 22)ÆÄÖ(normal 22)〇Øß二(normal)
+        (231 22)二æäöø(normal 28)€(normal 22)ÆÄÖ(normal 22)〇Øß二(normal)
+        (231)三æäöø€ÆÄÖ(normal)〇Øß三
+        (231)三æäöø€ÆÄÖ(normal)〇Øß三
+        (231)¶(normal)
+        "###);
+
+        let result = DeltaTest::with_args(&[
+            "--max-syntax-highlighting-length=10",
+            "--max-line-length=16",
+        ])
+        .explain_ansi()
+        .with_input(GIT_DIFF_ALL_UNICODE_W_FULLWIDTH);
+
+        // eprintln!("{}", result.raw_output);
+        assert_snapshot!(result.output, @r###"
+        (normal)
+
+        (blue)src/a(normal)
+        (blue)───────────────────────────────────────────(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)1(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (231)一æäöø€ÆÄÖ(normal)〇Øß→
+        (231)一æäöø€ÆÄÖ(normal)〇Øß→
+        (normal 52)二æäöø(normal 124)¢(normal 52)ÆÄÖ〇Øß→(normal)
+        (normal 52)二æäöø(normal 124)¢(normal 52)ÆÄÖ〇Øß→(normal)
+        (231 22)二æäöø(normal 28)€(normal 22)ÆÄÖ(normal 22)〇Øß→(normal)
+        (231 22)二æäöø(normal 28)€(normal 22)ÆÄÖ(normal 22)〇Øß→(normal)
+        (231)三æäöø€ÆÄÖ(normal)〇Øß→
+        (231)三æäöø€ÆÄÖ(normal)〇Øß→
+        (231)¶(normal)
+        "###);
     }
 
     const GIT_DIFF_SINGLE_HUNK: &str = "\
@@ -2033,6 +2331,53 @@ index 0000000..84d55c5
 +++ b/with space/file1
 @@ -0,0 +1 @@
 +file1 contents
+";
+
+    const MODIFIED_BASH_AND_CSHARP_FILES: &str = "\
+diff --git a/a b/a
+index 8c4ae06..0a37de7 100644
+--- a/a
++++ b/a
+@@ -9,7 +9,7 @@ foobar()
+     dst=$(winpath $2)
+ 
+     # List the directory.
+-    ls -l $src
++    ls -la $src
+ 
+     echo $src '->' $dst
+     rsync -avu --delete $src/ $dst
+diff --git a/b.cs b/b.cs
+index 2e73468..8d8b89d 100644
+--- a/b.cs
++++ b/b.cs
+@@ -6,7 +6,7 @@ class Program
+     {
+         static void Main(string[] args)
+         {
+-            int message = 123;
++            int message = 456;
+ 
+             Console.WriteLine(message);
+         }
+";
+
+    const MODIFIED_DOCKER_AND_RS_FILES: &str = "\
+diff --git a/Dockerfile b/Dockerfile
+index 0123456..1234567 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -0,0 +2 @@
++FROM foo
++COPY bar baz
+diff --git a/rs b/rs
+index 0123456..1234567 100644
+--- a/rs
++++ b/rs
+@@ -0,0 +2 @@
++fn foobar() -> i8 {
++    8
++}
 ";
 
     const RENAMED_FILE_INPUT: &str = "\
@@ -2292,6 +2637,42 @@ diff --git a/foo b/foo
 deleted file mode 100644
 index c9bbb35..5fc172d 100644
 Binary files a/foo and /dev/null differ
+";
+
+    const BINARY_FILES_DIFFER_AFTER_OTHER: &str = "
+diff --git a/foo b/bar
+similarity index 100%
+rename from foo
+rename to bar
+diff --git a/qux b/qux
+index 00de669..d47cd84 100644
+Binary files a/qux and b/qux differ
+";
+
+    const BINARY_FILES_DIFFER_BETWEEN_OTHER: &str = "\
+diff --git a/foo b/foo
+index 7b57bd29ea8a..4d3b8c11a4a2 100644
+--- a/foo
++++ b/foo
+@@ -1 +1 @@
+-abc
++def
+diff --git a/qux b/qux
+index 00de669..d47cd84 100644
+Binary files a/qux and b/qux differ
+diff --git a/bar b/bar
+index 7b57bd29ea8a..4d3b8c11a4a2 100644
+--- a/bar
++++ b/bar
+@@ -1 +1 @@
+-123
++456
+";
+
+    const DIFF_NO_INDEX_BINARY_FILES_DIFFER: &str = "\
+diff --git foo bar sub dir/foo bar baz
+index 329fbf5..481817c 100644
+Binary files foo bar and sub dir/foo bar baz differ
 ";
 
     const GIT_DIFF_WITH_COPIED_FILE: &str = "
@@ -2726,5 +3107,22 @@ Date:   Tue Jun 21 14:48:20 2022 +0200
 diff --git a a
 new file mode 100644
 index 0000000..e69de29
+";
+
+    const GIT_DIFF_ALL_UNICODE_W_FULLWIDTH: &str = "
+diff --git a/src/a b/src/a
+index 53f98b6..14d6caa 100644
+--- a/src/a
++++ b/src/a
+@@ -1,7 +1,7 @@
+ 一æäöø€ÆÄÖ〇Øß一
+ 一æäöø€ÆÄÖ〇Øß一
+-二æäöø¢ÆÄÖ〇Øß二
+-二æäöø¢ÆÄÖ〇Øß二
++二æäöø€ÆÄÖ〇Øß二
++二æäöø€ÆÄÖ〇Øß二
+ 三æäöø€ÆÄÖ〇Øß三
+ 三æäöø€ÆÄÖ〇Øß三
+ ¶
 ";
 }

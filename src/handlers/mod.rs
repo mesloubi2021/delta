@@ -17,7 +17,7 @@ pub mod submodule;
 
 use crate::delta::{State, StateMachine};
 
-impl<'a> StateMachine<'a> {
+impl StateMachine<'_> {
     pub fn handle_additional_cases(&mut self, to_state: State) -> std::io::Result<bool> {
         let mut handled_line = false;
 
@@ -30,6 +30,8 @@ impl<'a> StateMachine<'a> {
         //
         // 2. Git diff emits lines describing submodule state such as "Submodule x/y/z contains
         //    untracked content"
+        //
+        // 3. When comparing binary files, diff can emit "Binary files ... differ" line.
         //
         // See https://github.com/dandavison/delta/issues/60#issuecomment-557485242 for a
         // proposal for more robust parsing logic.

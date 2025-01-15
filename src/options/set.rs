@@ -43,6 +43,7 @@ macro_rules! set_options {
                 "24-bit-color",
                 "diff-highlight", // Does not exist as a flag on config
                 "diff-so-fancy", // Does not exist as a flag on config
+                "detect-dark-light", // Does not exist as a flag on config
                 "features",  // Processed differently
                 // Set prior to the rest
                 "no-gitconfig",
@@ -78,7 +79,7 @@ pub fn set_options(
     }
     opt.navigate = opt.navigate || opt.env.navigate.is_some();
     if opt.syntax_theme.is_none() {
-        opt.syntax_theme = opt.env.bat_theme.clone();
+        opt.syntax_theme.clone_from(&opt.env.bat_theme);
     }
 
     let option_names = cli::Opt::get_argument_and_option_names();
@@ -139,6 +140,7 @@ pub fn set_options(
             commit_regex,
             commit_style,
             default_language,
+            diff_args,
             diff_stat_align_width,
             file_added_label,
             file_copied_label,
@@ -173,6 +175,7 @@ pub fn set_options(
             map_styles,
             max_line_distance,
             max_line_length,
+            max_syntax_length,
             // Hack: minus-style must come before minus-*emph-style because the latter default
             // dynamically to the value of the former.
             merge_conflict_begin_symbol,
@@ -234,7 +237,7 @@ pub fn set_options(
     // Setting ComputedValues
     set_widths_and_isatty(opt);
     set_true_color(opt);
-    theme::set__is_light_mode__syntax_theme__syntax_set(opt, assets);
+    theme::set__color_mode__syntax_theme__syntax_set(opt, assets);
     opt.computed.inspect_raw_lines =
         cli::InspectRawLines::from_str(&opt.inspect_raw_lines).unwrap();
     opt.computed.paging_mode = parse_paging_mode(&opt.paging_mode);
@@ -578,7 +581,7 @@ fn parse_width_specifier(width_arg: &str, terminal_width: usize) -> Result<usize
 
     let width = match width_arg.find('-') {
         None => parse(width_arg, false, false)?.try_into().unwrap(),
-        Some(index) if index == 0 => (terminal_width as isize + parse(width_arg, true, false)?)
+        Some(0) => (terminal_width as isize + parse(width_arg, true, false)?)
             .try_into()
             .map_err(|_| {
                 format!(
@@ -616,10 +619,20 @@ fn set_widths_and_isatty(opt: &mut cli::Opt) {
                 .unwrap_or_else(|err| fatal(format!("Invalid value for width: {err}")));
             (cli::Width::Fixed(width), true)
         }
-        None => (
-            cli::Width::Fixed(opt.computed.available_terminal_width),
-            true,
-        ),
+        None => {
+            #[cfg(test)]
+            {
+                // instead of passing `--width=..` to all tests, set it here:
+                (cli::Width::Fixed(tests::TERMINAL_WIDTH_IN_TESTS), true)
+            }
+            #[cfg(not(test))]
+            {
+                (
+                    cli::Width::Fixed(opt.computed.available_terminal_width),
+                    true,
+                )
+            }
+        }
     };
     opt.computed.decorations_width = decorations_width;
     opt.computed.background_color_extends_to_terminal_width =
@@ -631,7 +644,7 @@ fn set_true_color(opt: &mut cli::Opt) {
         // It's equal to its default, so the user might be using the deprecated
         // --24-bit-color option.
         if let Some(_24_bit_color) = opt._24_bit_color.as_ref() {
-            opt.true_color = _24_bit_color.clone();
+            opt.true_color.clone_from(_24_bit_color);
         }
     }
 
@@ -662,6 +675,8 @@ pub mod tests {
     use crate::cli;
     use crate::tests::integration_test_utils;
     use crate::utils::bat::output::PagingMode;
+
+    pub const TERMINAL_WIDTH_IN_TESTS: usize = 43;
 
     #[test]
     fn test_options_can_be_set_in_git_config() {
@@ -730,11 +745,11 @@ pub mod tests {
         );
 
         assert_eq!(opt.true_color, "never");
-        assert_eq!(opt.color_only, false);
+        assert!(!opt.color_only);
         assert_eq!(opt.commit_decoration_style, "black black");
         assert_eq!(opt.commit_style, "black black");
-        assert_eq!(opt.dark, false);
-        assert_eq!(opt.default_language, Some("rs".to_owned()));
+        assert!(!opt.dark);
+        assert_eq!(opt.default_language, "rs".to_owned());
         // TODO: should set_options not be called on any feature flags?
         // assert_eq!(opt.diff_highlight, true);
         // assert_eq!(opt.diff_so_fancy, true);
@@ -753,9 +768,9 @@ pub mod tests {
         assert_eq!(opt.file_regex_replacement, Some("s/foo/bar/".to_string()));
         assert_eq!(opt.hunk_header_decoration_style, "black black");
         assert_eq!(opt.hunk_header_style, "black black");
-        assert_eq!(opt.keep_plus_minus_markers, true);
-        assert_eq!(opt.light, true);
-        assert_eq!(opt.line_numbers, true);
+        assert!(opt.keep_plus_minus_markers);
+        assert!(opt.light);
+        assert!(opt.line_numbers);
         assert_eq!(opt.line_numbers_left_format, "xxxyyyzzz");
         assert_eq!(opt.line_numbers_left_style, "black black");
         assert_eq!(opt.line_numbers_minus_style, "black black");
@@ -769,15 +784,15 @@ pub mod tests {
         assert_eq!(opt.minus_empty_line_marker_style, "black black");
         assert_eq!(opt.minus_non_emph_style, "black black");
         assert_eq!(opt.minus_style, "black black");
-        assert_eq!(opt.navigate, true);
+        assert!(opt.navigate);
         assert_eq!(opt.navigate_regex, Some("xxxyyyzzz".to_string()));
         assert_eq!(opt.paging_mode, "never");
         assert_eq!(opt.plus_emph_style, "black black");
         assert_eq!(opt.plus_empty_line_marker_style, "black black");
         assert_eq!(opt.plus_non_emph_style, "black black");
         assert_eq!(opt.plus_style, "black black");
-        assert_eq!(opt.raw, true);
-        assert_eq!(opt.side_by_side, true);
+        assert!(opt.raw);
+        assert!(opt.side_by_side);
         assert_eq!(opt.syntax_theme, Some("xxxyyyzzz".to_string()));
         assert_eq!(opt.tab_width, 77);
         assert_eq!(opt.true_color, "never");

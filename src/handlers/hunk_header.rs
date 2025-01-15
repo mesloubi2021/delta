@@ -18,17 +18,18 @@
 // src/hunk_header.rs:119: fn write_to_output_buffer( │
 // ───────────────────────────────────────────────────┘
 // ```
-
+use std::convert::TryInto;
 use std::fmt::Write as FmtWrite;
 
-use lazy_static::lazy_static;
-use regex::Regex;
-
 use super::draw;
-use crate::config::{Config, HunkHeaderIncludeFilePath, HunkHeaderIncludeLineNumber};
+use crate::config::{
+    Config, HunkHeaderIncludeCodeFragment, HunkHeaderIncludeFilePath, HunkHeaderIncludeLineNumber,
+};
 use crate::delta::{self, DiffType, InMergeConflict, MergeParents, State, StateMachine};
 use crate::paint::{self, BgShouldFill, Painter, StyleSectionSpecifier};
 use crate::style::{DecorationStyle, Style};
+use lazy_static::lazy_static;
+use regex::Regex;
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct ParsedHunkHeader {
@@ -41,7 +42,63 @@ pub enum HunkHeaderIncludeHunkLabel {
     No,
 }
 
-impl<'a> StateMachine<'a> {
+// The output of `diff -u file1 file2` does not contain a header before the
+// `--- old.lua` / `+++ new.lua` block, and the hunk can of course contain lines
+// starting with '-- '. To avoid interpreting '--- lua comment' as a new header,
+// count the minus lines in a hunk (provided by the '@@ -1,4 +1,3 @@' header).
+// `diff` itself can not generate two diffs in this ambiguous format, so a second header
+// could just be ignored. But concatenated diffs exist and are accepted by `patch`.
+#[derive(Debug)]
+pub struct AmbiguousDiffMinusCounter(isize);
+
+impl AmbiguousDiffMinusCounter {
+    // The internal isize representation avoids calling `if let Some(..)` on every line. For
+    // nearly all input the counter is not needed, in this case it is decremented but ignored.
+    // [min, COUNTER_RELEVANT_IF_GT]   unambiguous diff
+    // (COUNTER_RELEVANT_IF_GT, 0]     handle next '--- ' like a header, and set counter in next @@ block
+    // [1, max]                        counting minus lines in ambiguous header
+    const COUNTER_RELEVANT_IF_GREATER_THAN: isize = -4096; // -1 works too, but be defensive
+    const EXPECT_DIFF_3DASH_HEADER: isize = 0;
+
+    pub fn not_needed() -> Self {
+        Self(Self::COUNTER_RELEVANT_IF_GREATER_THAN)
+    }
+    pub fn prepare_to_count() -> Self {
+        Self(Self::EXPECT_DIFF_3DASH_HEADER)
+    }
+    pub fn three_dashes_expected(&self) -> bool {
+        if self.0 > Self::COUNTER_RELEVANT_IF_GREATER_THAN {
+            self.0 <= Self::EXPECT_DIFF_3DASH_HEADER
+        } else {
+            true
+        }
+    }
+    pub fn count_line(&mut self) {
+        self.0 -= 1;
+    }
+    fn count_from(lines: usize) -> Self {
+        Self(
+            lines
+                .try_into()
+                .unwrap_or(Self::COUNTER_RELEVANT_IF_GREATER_THAN),
+        )
+    }
+    #[allow(clippy::needless_bool)]
+    fn must_count(&mut self) -> bool {
+        let relevant = self.0 > Self::COUNTER_RELEVANT_IF_GREATER_THAN;
+        if relevant {
+            true
+        } else {
+            #[cfg(target_pointer_width = "32")]
+            {
+                self.0 = Self::COUNTER_RELEVANT_IF_GREATER_THAN;
+            }
+            false
+        }
+    }
+}
+
+impl StateMachine<'_> {
     #[inline]
     fn test_hunk_header_line(&self) -> bool {
         self.line.starts_with("@@") &&
@@ -70,6 +127,15 @@ impl<'a> StateMachine<'a> {
                 | HunkPlus(diff_type, _) => diff_type.clone(),
                 _ => Unified,
             };
+
+            if self.minus_line_counter.must_count() {
+                if let &[(_, minus_lines), (_, _plus_lines), ..] =
+                    parsed_hunk_header.line_numbers_and_hunk_lengths.as_slice()
+                {
+                    self.minus_line_counter = AmbiguousDiffMinusCounter::count_from(minus_lines);
+                }
+            }
+
             self.state = HunkHeader(
                 diff_type,
                 parsed_hunk_header,
@@ -133,6 +199,7 @@ impl<'a> StateMachine<'a> {
                 &self.config.hunk_header_style_include_file_path,
                 &self.config.hunk_header_style_include_line_number,
                 &HunkHeaderIncludeHunkLabel::Yes,
+                &self.config.hunk_header_style_include_code_fragment,
                 ":",
                 self.config,
             )?;
@@ -229,13 +296,16 @@ pub fn write_line_of_code_with_optional_path_and_line_number(
     include_file_path: &HunkHeaderIncludeFilePath,
     include_line_number: &HunkHeaderIncludeLineNumber,
     include_hunk_label: &HunkHeaderIncludeHunkLabel,
+    include_code_fragment: &HunkHeaderIncludeCodeFragment,
     file_path_separator: &str,
     config: &Config,
 ) -> std::io::Result<()> {
     let (mut draw_fn, _, decoration_ansi_term_style) = draw::get_draw_function(decoration_style);
     let line = if config.color_only {
         line.to_string()
-    } else if !code_fragment.is_empty() {
+    } else if matches!(include_code_fragment, HunkHeaderIncludeCodeFragment::Yes)
+        && !code_fragment.is_empty()
+    {
         format!("{code_fragment} ")
     } else {
         "".to_string()

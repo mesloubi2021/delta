@@ -6,7 +6,6 @@ use crate::env::DeltaEnv;
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
-use std::str::FromStr;
 
 use lazy_static::lazy_static;
 
@@ -66,7 +65,19 @@ impl GitConfig {
 
     #[cfg(test)]
     pub fn try_create(_env: &DeltaEnv) -> Option<Self> {
-        unreachable!("GitConfig::try_create() is not available when testing");
+        // Do not read local git configs when testing
+        None
+    }
+
+    #[cfg(test)]
+    pub fn for_testing() -> Option<Self> {
+        Some(GitConfig {
+            config: git2::Config::new().unwrap(),
+            config_from_env_var: HashMap::new(),
+            enabled: true,
+            repo: None,
+            path: std::path::PathBuf::from("/invalid_null.git"),
+        })
     }
 
     pub fn from_path(env: &DeltaEnv, path: &Path, honor_env_var: bool) -> Self {
@@ -108,7 +119,9 @@ impl GitConfig {
         }
     }
 
+    #[cfg(not(test))]
     pub fn get_remote_url(&self) -> Option<GitRemoteRepo> {
+        use std::str::FromStr;
         self.repo
             .as_ref()?
             .find_remote("origin")

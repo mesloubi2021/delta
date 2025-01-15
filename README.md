@@ -5,8 +5,8 @@
   <a href="https://github.com/dandavison/delta/actions">
     <img src="https://github.com/dandavison/delta/workflows/Continuous%20Integration/badge.svg" alt="CI">
   </a>
-  <a href="https://coveralls.io/github/dandavison/delta?branch=master">
-    <img src="https://coveralls.io/repos/github/dandavison/delta/badge.svg?branch=master" alt="Coverage Status">
+  <a href="https://coveralls.io/github/dandavison/delta?branch=main">
+    <img src="https://coveralls.io/repos/github/dandavison/delta/badge.svg?branch=main" alt="Coverage Status">
   </a>
   <a href="https://gitter.im/dandavison-delta/community?utm_source=badge&amp;utm_medium=badge&amp;utm_campaign=pr-badge">
     <img src="https://badges.gitter.im/dandavison-delta/community.svg" alt="Gitter">
@@ -25,17 +25,23 @@
     diffFilter = delta --color-only
 
 [delta]
-    navigate = true    # use n and N to move between diff sections
-    light = false      # set to true if you're in a terminal w/ a light background color (e.g. the default macOS terminal)
+    navigate = true  # use n and N to move between diff sections
+    dark = true      # or light = true, or omit for auto-detection
 
 [merge]
-    conflictstyle = diff3
-
-[diff]
-    colorMoved = default
+    conflictstyle = zdiff3
 ```
 
-Delta has many features and is very customizable; please see the [user manual](https://dandavison.github.io/delta/).
+Or run:
+
+```sh
+git config --global core.pager delta
+git config --global interactive.diffFilter 'delta --color-only'
+git config --global delta.navigate true
+git config --global merge.conflictStyle zdiff3
+```
+
+Delta has many features and is very customizable; please see `delta -h` (short help) or `delta --help` (full manual), or the [online user manual](https://dandavison.github.io/delta/).
 
 ## Features
 
@@ -55,27 +61,28 @@ Delta has many features and is very customizable; please see the [user manual](h
 - Stylable box/line decorations to draw attention to commit, file and hunk header sections.
 - Style strings (foreground color, background color, font attributes) are supported for >20 stylable elements, using the same color/style language as git
 - Handles traditional unified diff output in addition to git output
+- Automatic detection of light/dark terminal background
 
 ## A syntax-highlighting pager for git, diff, and grep output
 
 Code evolves, and we all spend time studying diffs. Delta aims to make this both efficient and enjoyable: it allows you to make extensive changes to the layout and styling of diffs, as well as allowing you to stay arbitrarily close to the default git/diff output.
 
-<table>
+<table align="center">
   <tr>
     <td>
       <img width=400px src="https://user-images.githubusercontent.com/52205/86275526-76792100-bba1-11ea-9e78-6be9baa80b29.png" alt="image" />
       <br>
-      <sub>delta with <code>line-numbers</code> activated</sub>
+      <p align="center"><sub>delta with <code>line-numbers</code> activated</sub></p>
     </td>
   </tr>
 </table>
 
-<table>
+<table align="center">
   <tr>
     <td>
       <img width=800px src="https://user-images.githubusercontent.com/52205/87230973-412eb900-c381-11ea-8aec-cc200290bd1b.png" alt="image" />
       <br>
-      <sub>delta with <code>side-by-side</code> and <code>line-numbers</code> activated</sub>
+      <p align="center"><sub>delta with <code>side-by-side</code> and <code>line-numbers</code> activated</sub></p>
     </td>
   </tr>
 </table>
@@ -84,7 +91,7 @@ Here's what `git show` can look like with git configured to use delta:
 
 <br>
 
-<table>
+<table align="center">
   <tr>
     <td>
       <img width=500px style="border: 1px solid black"
@@ -191,3 +198,8 @@ Side-by-side view wraps long lines automatically:
 ### Installation and usage
 
 Please see the [user manual](https://dandavison.github.io/delta/) and `delta --help`.
+
+### Maintainers
+
+- [@dandavison](https://github.com/dandavison)
+- [@th1000s](https://github.com/th1000s)

@@ -1,24 +1,34 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use lazy_static::lazy_static;
 use sysinfo::{Pid, PidExt, Process, ProcessExt, ProcessRefreshKind, SystemExt};
+
+use crate::utils::DELTA_ATOMIC_ORDERING;
 
 pub type DeltaPid = u32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallingProcess {
     GitDiff(CommandLine),
-    GitShow(CommandLine, Option<String>), // element 2 is file extension
+    GitShow(CommandLine, Option<String>), // element 2 is filename
     GitLog(CommandLine),
     GitReflog(CommandLine),
+    GitBlame(CommandLine),
     GitGrep(CommandLine),
     OtherGrep, // rg, grep, ag, ack, etc
     None,      // no matching process could be found
     Pending,   // calling process is currently being determined
 }
-// TODO: Git blame is currently handled differently
+
+// The information where the calling process info comes from *should* be inside
+// `CallingProcess`, but that is handed out (within a MutexGuard) to callers.
+// To keep the interface simple, store it here:
+static CALLER_INFO_SOURCE: AtomicUsize = AtomicUsize::new(CALLER_GUESSED);
+const CALLER_GUESSED: usize = 1;
+const CALLER_KNOWN: usize = 2;
 
 impl CallingProcess {
     pub fn paths_in_input_are_relative_to_cwd(&self) -> bool {
@@ -26,7 +36,9 @@ impl CallingProcess {
             CallingProcess::GitDiff(cmd) if cmd.long_options.contains("--relative") => true,
             CallingProcess::GitShow(cmd, _) if cmd.long_options.contains("--relative") => true,
             CallingProcess::GitLog(cmd) if cmd.long_options.contains("--relative") => true,
-            CallingProcess::GitGrep(_) | CallingProcess::OtherGrep => true,
+            CallingProcess::GitBlame(_)
+            | CallingProcess::GitGrep(_)
+            | CallingProcess::OtherGrep => true,
             _ => false,
         }
     }
@@ -36,7 +48,7 @@ impl CallingProcess {
 pub struct CommandLine {
     pub long_options: HashSet<String>,
     pub short_options: HashSet<String>,
-    last_arg: Option<String>,
+    pub last_arg: Option<String>,
 }
 
 lazy_static! {
@@ -44,6 +56,8 @@ lazy_static! {
         Arc::new((Mutex::new(CallingProcess::Pending), Condvar::new()));
 }
 
+// delta was called by this process (or called by something which called delta and it),
+// try looking up this information in the process tree.
 pub fn start_determining_calling_process_in_thread() {
     // The handle is neither kept nor returned nor joined but dropped, so the main
     // thread can exit early if it does not need to know its parent process.
@@ -55,10 +69,26 @@ pub fn start_determining_calling_process_in_thread() {
             let (caller_mutex, determine_done) = &**CALLER;
 
             let mut caller = caller_mutex.lock().unwrap();
-            *caller = calling_process;
+
+            if CALLER_INFO_SOURCE.load(DELTA_ATOMIC_ORDERING) <= CALLER_GUESSED {
+                *caller = calling_process;
+            }
+
             determine_done.notify_all();
         })
         .unwrap();
+}
+
+// delta starts the process, so it is known.
+pub fn set_calling_process(args: &[String]) {
+    if let ProcessArgs::Args(result) = describe_calling_process(args) {
+        let (caller_mutex, determine_done) = &**CALLER;
+
+        let mut caller = caller_mutex.lock().unwrap();
+        *caller = result;
+        CALLER_INFO_SOURCE.store(CALLER_KNOWN, DELTA_ATOMIC_ORDERING);
+        determine_done.notify_all();
+    }
 }
 
 #[cfg(not(test))]
@@ -110,31 +140,6 @@ pub enum ProcessArgs<T> {
     OtherProcess,
 }
 
-pub fn git_blame_filename_extension() -> Option<String> {
-    calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension)
-}
-
-pub fn guess_git_blame_filename_extension(args: &[String]) -> ProcessArgs<String> {
-    let all_args = args.iter().map(|s| s.as_str());
-
-    // See git(1) and git-blame(1). Some arguments separate their parameter with space or '=', e.g.
-    // --date 2015 or --date=2015.
-    let git_blame_options_with_parameter =
-        "-C -c -L --since --ignore-rev --ignore-revs-file --contents --reverse --date";
-
-    let selected_args =
-        skip_uninteresting_args(all_args, git_blame_options_with_parameter.split(' '));
-
-    match selected_args.as_slice() {
-        [git, "blame", .., last_arg] if is_git_binary(git) => match last_arg.split('.').last() {
-            Some(arg) => ProcessArgs::Args(arg.to_string()),
-            None => ProcessArgs::ArgError,
-        },
-        [git, "blame"] if is_git_binary(git) => ProcessArgs::ArgError,
-        _ => ProcessArgs::OtherProcess,
-    }
-}
-
 pub fn describe_calling_process(args: &[String]) -> ProcessArgs<CallingProcess> {
     let mut args = args.iter().map(|s| s.as_str());
 
@@ -150,7 +155,12 @@ pub fn describe_calling_process(args: &[String]) -> ProcessArgs<CallingProcess> 
         Some(command) => match Path::new(command).file_stem() {
             Some(s) if s.to_str().map(is_git_binary).unwrap_or(false) => {
                 let mut args = args.skip_while(|s| {
-                    *s != "diff" && *s != "show" && *s != "log" && *s != "reflog" && *s != "grep"
+                    *s != "diff"
+                        && *s != "show"
+                        && *s != "log"
+                        && *s != "reflog"
+                        && *s != "grep"
+                        && *s != "blame"
                 });
                 match args.next() {
                     Some("diff") => {
@@ -158,17 +168,17 @@ pub fn describe_calling_process(args: &[String]) -> ProcessArgs<CallingProcess> 
                     }
                     Some("show") => {
                         let command_line = parse_command_line(args);
-                        let extension = if let Some(last_arg) = &command_line.last_arg {
+                        let filename = if let Some(last_arg) = &command_line.last_arg {
                             match last_arg.split_once(':') {
-                                Some((_, suffix)) => {
-                                    suffix.split('.').last().map(|s| s.to_string())
-                                }
+                                Some((_, filename)) => Path::new(filename)
+                                    .file_name()
+                                    .map(|f| f.to_string_lossy().to_string()),
                                 None => None,
                             }
                         } else {
                             None
                         };
-                        ProcessArgs::Args(CallingProcess::GitShow(command_line, extension))
+                        ProcessArgs::Args(CallingProcess::GitShow(command_line, filename))
                     }
                     Some("log") => {
                         ProcessArgs::Args(CallingProcess::GitLog(parse_command_line(args)))
@@ -178,6 +188,9 @@ pub fn describe_calling_process(args: &[String]) -> ProcessArgs<CallingProcess> 
                     }
                     Some("grep") => {
                         ProcessArgs::Args(CallingProcess::GitGrep(parse_command_line(args)))
+                    }
+                    Some("blame") => {
+                        ProcessArgs::Args(CallingProcess::GitBlame(parse_command_line(args)))
                     }
                     _ => {
                         // It's git, but not a subcommand that we parse. Don't
@@ -218,49 +231,19 @@ fn is_git_binary(git: &str) -> bool {
         .unwrap_or(false)
 }
 
-// Skip all arguments starting with '-' from `args_it`. Also skip all arguments listed in
-// `skip_this_plus_parameter` plus their respective next argument.
-// Keep all arguments once a '--' is encountered.
-// (Note that some arguments work with and without '=': '--foo' 'bar' / '--foo=bar')
-fn skip_uninteresting_args<'a, 'b, ArgsI, SkipI>(
-    mut args_it: ArgsI,
-    skip_this_plus_parameter: SkipI,
-) -> Vec<&'a str>
-where
-    ArgsI: Iterator<Item = &'a str>,
-    SkipI: Iterator<Item = &'b str>,
-{
-    let arg_follows_space: HashSet<&'b str> = skip_this_plus_parameter.into_iter().collect();
-
-    let mut result = Vec::new();
-    loop {
-        match args_it.next() {
-            None => break result,
-            Some("--") => {
-                result.extend(args_it);
-                break result;
-            }
-            Some(arg) if arg_follows_space.contains(arg) => {
-                let _skip_parameter = args_it.next();
-            }
-            Some(arg) if !arg.starts_with('-') => {
-                result.push(arg);
-            }
-            Some(_) => { /* skip: --these -and --also=this */ }
-        }
-    }
-}
-
 // Given `--aa val -bc -d val e f -- ...` return
 // ({"--aa"}, {"-b", "-c", "-d"})
 fn parse_command_line<'a>(args: impl Iterator<Item = &'a str>) -> CommandLine {
     let mut long_options = HashSet::new();
     let mut short_options = HashSet::new();
     let mut last_arg = None;
+    let mut after_double_dash = false;
 
     for s in args {
-        if s == "--" {
-            break;
+        if after_double_dash {
+            last_arg = Some(s);
+        } else if s == "--" {
+            after_double_dash = true;
         } else if s.starts_with("--") {
             long_options.insert(s.split('=').next().unwrap().to_owned());
         } else if let Some(suffix) = s.strip_prefix('-') {
@@ -534,7 +517,7 @@ where
             // The full scan is expensive on Linux and rarely successful, so disable it by default.
             #[cfg(target_os = "linux")]
             let full_scan = std::env::var("DELTA_CALLING_PROCESS_QUERY_ALL")
-                .map_or(false, |v| !["0", "false", "no"].iter().any(|&n| n == v));
+                .is_ok_and(|v| !["0", "false", "no"].iter().any(|&n| n == v));
 
             if full_scan {
                 info.refresh_processes();
@@ -583,7 +566,7 @@ pub mod tests {
     use std::rc::Rc;
 
     thread_local! {
-        static FAKE_ARGS: RefCell<TlsState<Vec<String>>> = RefCell::new(TlsState::None);
+        static FAKE_ARGS: RefCell<TlsState<Vec<String>>> = const { RefCell::new(TlsState::None) };
     }
 
     #[derive(Debug, PartialEq)]
@@ -593,6 +576,7 @@ pub mod tests {
         With(usize, Rc<Vec<T>>),
         None,
         Invalid,
+        ErrorAlreadyHandled,
     }
 
     // When calling `FakeParentArgs::get()`, it can return `Some(values)` which were set earlier
@@ -643,24 +627,39 @@ pub mod tests {
                     TlsState::With(n, args) => TlsState::With(*n + 1, Rc::clone(args)),
                     TlsState::None => TlsState::None,
                     TlsState::Invalid => TlsState::Invalid,
+                    TlsState::ErrorAlreadyHandled => TlsState::ErrorAlreadyHandled,
                 });
 
                 match old_value {
                     TlsState::Once(args) | TlsState::Scope(args) => Some(args),
                     TlsState::With(n, args) if n < args.len() => Some(args[n].clone()),
                     TlsState::None => None,
-                    TlsState::Invalid | TlsState::With(_, _) => Self::error("get"),
+                    TlsState::Invalid | TlsState::With(_, _) | TlsState::ErrorAlreadyHandled => {
+                        Self::error("get");
+                        None
+                    }
                 }
             })
         }
         pub fn are_set() -> bool {
-            FAKE_ARGS.with(|a| *a.borrow() != TlsState::None)
+            FAKE_ARGS.with(|a| {
+                *a.borrow() != TlsState::None && *a.borrow() != TlsState::ErrorAlreadyHandled
+            })
         }
-        fn error(where_: &str) -> ! {
-            panic!(
-                "test logic error (in {}): wrong FakeParentArgs scope?",
-                where_
-            );
+        fn error(where_: &str) {
+            FAKE_ARGS.with(|a| {
+                let old_value = a.replace(TlsState::ErrorAlreadyHandled);
+
+                match old_value {
+                    TlsState::ErrorAlreadyHandled => (),
+                    _ => {
+                        panic!(
+                            "test logic error (in {}): wrong FakeParentArgs scope?",
+                            where_
+                        );
+                    }
+                }
+            });
         }
     }
     impl Drop for FakeParentArgs {
@@ -675,94 +674,19 @@ pub mod tests {
                         }
                     }
                     TlsState::Once(_) | TlsState::None => Self::error("drop"),
-                    TlsState::Scope(_) | TlsState::Invalid => {}
+                    TlsState::Scope(_) | TlsState::Invalid | TlsState::ErrorAlreadyHandled => {}
                 }
             });
         }
     }
 
-    #[test]
-    fn test_guess_git_blame_filename_extension() {
-        use ProcessArgs::Args;
-
-        fn make_string_vec(args: &[&str]) -> Vec<String> {
-            args.iter().map(|&x| x.to_owned()).collect::<Vec<String>>()
-        }
-        let args = make_string_vec(&["git", "blame", "hello", "world.txt"]);
-        assert_eq!(
-            guess_git_blame_filename_extension(&args),
-            Args("txt".into())
-        );
-
-        let args = make_string_vec(&[
-            "git",
-            "blame",
-            "-s",
-            "-f",
-            "hello.txt",
-            "--date=2015",
-            "--date",
-            "now",
-        ]);
-        assert_eq!(
-            guess_git_blame_filename_extension(&args),
-            Args("txt".into())
-        );
-
-        let args = make_string_vec(&["git", "blame", "-s", "-f", "--", "hello.txt"]);
-        assert_eq!(
-            guess_git_blame_filename_extension(&args),
-            Args("txt".into())
-        );
-
-        let args = make_string_vec(&["git", "blame", "--", "--not.an.argument"]);
-        assert_eq!(
-            guess_git_blame_filename_extension(&args),
-            Args("argument".into())
-        );
-
-        let args = make_string_vec(&["foo", "bar", "-a", "--123", "not.git"]);
-        assert_eq!(
-            guess_git_blame_filename_extension(&args),
-            ProcessArgs::OtherProcess
-        );
-
-        let args = make_string_vec(&["git", "blame", "--help.txt"]);
-        assert_eq!(
-            guess_git_blame_filename_extension(&args),
-            ProcessArgs::ArgError
-        );
-
-        let args = make_string_vec(&["git", "-c", "a=b", "blame", "main.rs"]);
-        assert_eq!(guess_git_blame_filename_extension(&args), Args("rs".into()));
-
-        let args = make_string_vec(&["git", "blame", "README"]);
-        assert_eq!(
-            guess_git_blame_filename_extension(&args),
-            Args("README".into())
-        );
-
-        let args = make_string_vec(&["git", "blame", ""]);
-        assert_eq!(guess_git_blame_filename_extension(&args), Args("".into()));
-    }
-
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     struct FakeProc {
         #[allow(dead_code)]
         pid: DeltaPid,
         start_time: u64,
         cmd: Vec<String>,
         ppid: Option<DeltaPid>,
-    }
-    impl Default for FakeProc {
-        fn default() -> Self {
-            Self {
-                pid: 0,
-                start_time: 0,
-                cmd: Vec::new(),
-                ppid: None,
-            }
-        }
     }
     impl FakeProc {
         fn new(pid: DeltaPid, start_time: u64, cmd: Vec<String>, ppid: Option<DeltaPid>) -> Self {
@@ -790,18 +714,10 @@ pub mod tests {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     struct MockProcInfo {
         delta_pid: DeltaPid,
         info: HashMap<Pid, FakeProc>,
-    }
-    impl Default for MockProcInfo {
-        fn default() -> Self {
-            Self {
-                delta_pid: 0,
-                info: HashMap::new(),
-            }
-        }
     }
     impl MockProcInfo {
         fn with(processes: &[(DeltaPid, u64, &str, Option<DeltaPid>)]) -> Self {
@@ -848,51 +764,71 @@ pub mod tests {
         {
             let _args = FakeParentArgs::once("git blame hello");
             assert_eq!(
-                calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension),
-                Some("hello".into())
+                calling_process_cmdline(ProcInfo::new(), describe_calling_process),
+                Some(CallingProcess::GitBlame(CommandLine {
+                    long_options: [].into(),
+                    short_options: [].into(),
+                    last_arg: Some("hello".into())
+                }))
             );
         }
         {
             let _args = FakeParentArgs::once("git blame world.txt");
             assert_eq!(
-                calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension),
-                Some("txt".into())
+                calling_process_cmdline(ProcInfo::new(), describe_calling_process),
+                Some(CallingProcess::GitBlame(CommandLine {
+                    long_options: [].into(),
+                    short_options: [].into(),
+                    last_arg: Some("world.txt".into())
+                }))
             );
         }
         {
             let _args = FakeParentArgs::for_scope("git blame hello world.txt");
             assert_eq!(
-                calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension),
-                Some("txt".into())
-            );
-
-            assert_eq!(
-                calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension),
-                Some("txt".into())
+                calling_process_cmdline(ProcInfo::new(), describe_calling_process),
+                Some(CallingProcess::GitBlame(CommandLine {
+                    long_options: [].into(),
+                    short_options: [].into(),
+                    last_arg: Some("world.txt".into())
+                }))
             );
         }
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "test logic error (in get): wrong FakeParentArgs scope?")]
     fn test_process_testing_assert() {
         let _args = FakeParentArgs::once("git blame do.not.panic");
         assert_eq!(
-            calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension),
-            Some("panic".into())
+            calling_process_cmdline(ProcInfo::new(), describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: [].into(),
+                short_options: [].into(),
+                last_arg: Some("do.not.panic".into())
+            }))
         );
-
-        calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension);
+        calling_process_cmdline(ProcInfo::new(), describe_calling_process);
     }
 
     #[test]
-    #[should_panic]
-    fn test_process_testing_assert_never_used() {
+    #[should_panic(expected = "test logic error (in drop): wrong FakeParentArgs scope?")]
+    fn test_process_testing_assert_once_never_used() {
         let _args = FakeParentArgs::once("never used");
+    }
 
-        // causes a panic while panicking, so can't test:
-        // let _args = FakeParentArgs::for_scope(&"never used");
-        // let _args = FakeParentArgs::once(&"never used");
+    #[test]
+    #[should_panic(expected = "test logic error (in once): wrong FakeParentArgs scope?")]
+    fn test_process_testing_assert_for_scope_never_used() {
+        let _args = FakeParentArgs::for_scope(&"never used");
+        let _args = FakeParentArgs::once(&"never used");
+    }
+
+    #[test]
+    #[should_panic(expected = "test logic error (in for_scope): wrong FakeParentArgs scope?")]
+    fn test_process_testing_assert_once_never_used2() {
+        let _args = FakeParentArgs::once(&"never used");
+        let _args = FakeParentArgs::for_scope(&"never used");
     }
 
     #[test]
@@ -901,50 +837,70 @@ pub mod tests {
     }
 
     #[test]
-    fn test_process_testing_n_times_panic() {
+    fn test_process_testing_n_times() {
         let _args = FakeParentArgs::with(&["git blame once", "git blame twice"]);
         assert_eq!(
-            calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension),
-            Some("once".into())
+            calling_process_cmdline(ProcInfo::new(), describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: [].into(),
+                short_options: [].into(),
+                last_arg: Some("once".into())
+            }))
         );
 
         assert_eq!(
-            calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension),
-            Some("twice".into())
+            calling_process_cmdline(ProcInfo::new(), describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: [].into(),
+                short_options: [].into(),
+                last_arg: Some("twice".into())
+            }))
         );
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "test logic error (in drop with): wrong FakeParentArgs scope?")]
     fn test_process_testing_n_times_unused() {
         let _args = FakeParentArgs::with(&["git blame once", "git blame twice"]);
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "test logic error (in drop with): wrong FakeParentArgs scope?")]
     fn test_process_testing_n_times_underused() {
         let _args = FakeParentArgs::with(&["git blame once", "git blame twice"]);
         assert_eq!(
-            calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension),
-            Some("once".into())
+            calling_process_cmdline(ProcInfo::new(), describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: [].into(),
+                short_options: [].into(),
+                last_arg: Some("once".into())
+            }))
         );
     }
 
     #[test]
-    #[should_panic]
-    #[ignore]
+    #[should_panic(expected = "test logic error (in get): wrong FakeParentArgs scope?")]
     fn test_process_testing_n_times_overused() {
         let _args = FakeParentArgs::with(&["git blame once"]);
         assert_eq!(
-            calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension),
-            Some("once".into())
+            calling_process_cmdline(ProcInfo::new(), describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: [].into(),
+                short_options: [].into(),
+                last_arg: Some("once".into())
+            }))
         );
-        // ignored: dropping causes a panic while panicking, so can't test
-        calling_process_cmdline(ProcInfo::new(), guess_git_blame_filename_extension);
+        calling_process_cmdline(ProcInfo::new(), describe_calling_process);
     }
 
     #[test]
-    fn test_process_blame_no_parent_found() {
+    fn test_describe_calling_process_blame() {
+        let no_processes = MockProcInfo::with(&[]);
+        assert_eq!(
+            calling_process_cmdline(no_processes, describe_calling_process),
+            None
+        );
+
         let two_trees = MockProcInfo::with(&[
             (2, 100, "-shell", None),
             (3, 100, "git blame src/main.rs", Some(2)),
@@ -952,43 +908,119 @@ pub mod tests {
             (5, 100, "delta", Some(4)),
         ]);
         assert_eq!(
-            calling_process_cmdline(two_trees, guess_git_blame_filename_extension),
-            None
-        );
-    }
-
-    #[test]
-    fn test_process_blame_info_with_parent() {
-        let no_processes = MockProcInfo::with(&[]);
-        assert_eq!(
-            calling_process_cmdline(no_processes, guess_git_blame_filename_extension),
+            calling_process_cmdline(two_trees, describe_calling_process),
             None
         );
 
+        let no_options_command_line = CommandLine {
+            long_options: [].into(),
+            short_options: [].into(),
+            last_arg: Some("hello.txt".to_string()),
+        };
         let parent = MockProcInfo::with(&[
             (2, 100, "-shell", None),
             (3, 100, "git blame hello.txt", Some(2)),
             (4, 100, "delta", Some(3)),
         ]);
         assert_eq!(
-            calling_process_cmdline(parent, guess_git_blame_filename_extension),
-            Some("txt".into())
+            calling_process_cmdline(parent, describe_calling_process),
+            Some(CallingProcess::GitBlame(no_options_command_line.clone()))
+        );
+
+        let parent = MockProcInfo::with(&[
+            (2, 100, "-shell", None),
+            (3, 100, "git blame -- hello.txt", Some(2)),
+            (4, 100, "delta", Some(3)),
+        ]);
+        assert_eq!(
+            calling_process_cmdline(parent, describe_calling_process),
+            Some(CallingProcess::GitBlame(no_options_command_line.clone()))
+        );
+
+        let parent = MockProcInfo::with(&[
+            (2, 100, "-shell", None),
+            (3, 100, "git blame -- --not.an.argument", Some(2)),
+            (4, 100, "delta", Some(3)),
+        ]);
+        assert_eq!(
+            calling_process_cmdline(parent, describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: [].into(),
+                short_options: [].into(),
+                last_arg: Some("--not.an.argument".to_string()),
+            }))
+        );
+
+        let parent = MockProcInfo::with(&[
+            (2, 100, "-shell", None),
+            (3, 100, "git blame --help.txt", Some(2)),
+            (4, 100, "delta", Some(3)),
+        ]);
+        assert_eq!(
+            calling_process_cmdline(parent, describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: ["--help.txt".into()].into(),
+                short_options: [].into(),
+                last_arg: None,
+            }))
+        );
+
+        let parent = MockProcInfo::with(&[
+            (2, 100, "-shell", None),
+            (3, 100, "git blame --", Some(2)),
+            (4, 100, "delta", Some(3)),
+        ]);
+        assert_eq!(
+            calling_process_cmdline(parent, describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: [].into(),
+                short_options: [].into(),
+                last_arg: None,
+            }))
+        );
+
+        let parent = MockProcInfo::with(&[
+            (2, 100, "-shell", None),
+            (3, 100, "Git.exe blame hello.txt", Some(2)),
+            (4, 100, "delta", Some(3)),
+        ]);
+        assert_eq!(
+            calling_process_cmdline(parent, describe_calling_process),
+            Some(CallingProcess::GitBlame(no_options_command_line.clone()))
+        );
+
+        let git_blame_command =
+            "git -c a=b blame -fnb --incremental -t --color-by-age -M --since=3.weeks --contents annotation.txt -C -C2 hello.txt";
+
+        // here -C2 is parsed as -C and -2. It doesn't really matters because we only use last_arg from options
+        // to determine the file type.
+        let expected_result = Some(CallingProcess::GitBlame(CommandLine {
+            long_options: set(&["--incremental", "--color-by-age", "--since", "--contents"]),
+            short_options: set(&["-f", "-n", "-b", "-t", "-M", "-C", "-2"]),
+            last_arg: Some("hello.txt".to_string()),
+        }));
+
+        let parent = MockProcInfo::with(&[
+            (2, 100, "-shell", None),
+            (3, 100, git_blame_command, Some(2)),
+            (4, 100, "delta", Some(3)),
+        ]);
+        assert_eq!(
+            calling_process_cmdline(parent, describe_calling_process),
+            expected_result
         );
 
         let grandparent = MockProcInfo::with(&[
             (2, 100, "-shell", None),
-            (3, 100, "git blame src/main.rs", Some(2)),
+            (3, 100, git_blame_command, Some(2)),
             (4, 100, "call_delta.sh", Some(3)),
             (5, 100, "delta", Some(4)),
         ]);
         assert_eq!(
-            calling_process_cmdline(grandparent, guess_git_blame_filename_extension),
-            Some("rs".into())
+            calling_process_cmdline(grandparent, describe_calling_process),
+            expected_result
         );
-    }
 
-    #[test]
-    fn test_process_blame_info_with_sibling() {
         let sibling = MockProcInfo::with(&[
             (2, 100, "-xterm", None),
             (3, 100, "-shell", Some(2)),
@@ -996,8 +1028,12 @@ pub mod tests {
             (5, 100, "delta", Some(3)),
         ]);
         assert_eq!(
-            calling_process_cmdline(sibling, guess_git_blame_filename_extension),
-            Some("rs".into())
+            calling_process_cmdline(sibling, describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: [].into(),
+                short_options: [].into(),
+                last_arg: Some("src/main.rs".into())
+            }))
         );
 
         let indirect_sibling = MockProcInfo::with(&[
@@ -1014,8 +1050,12 @@ pub mod tests {
             (20, 100, "delta", Some(5)),
         ]);
         assert_eq!(
-            calling_process_cmdline(indirect_sibling, guess_git_blame_filename_extension),
-            Some("abc".into())
+            calling_process_cmdline(indirect_sibling, describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: set(&["--correct"]),
+                short_options: [].into(),
+                last_arg: Some("src/main.abc".into())
+            }))
         );
 
         let indirect_sibling2 = MockProcInfo::with(&[
@@ -1027,8 +1067,12 @@ pub mod tests {
             (20, 100, "delta", Some(5)),
         ]);
         assert_eq!(
-            calling_process_cmdline(indirect_sibling2, guess_git_blame_filename_extension),
-            Some("def".into())
+            calling_process_cmdline(indirect_sibling2, describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: [].into(),
+                short_options: [].into(),
+                last_arg: Some("src/main.def".into())
+            }))
         );
 
         // 3 blame processes, 2 with matching start times, pick the one with lower
@@ -1046,11 +1090,12 @@ pub mod tests {
             (20, 100, "delta", Some(5)),
         ]);
         assert_eq!(
-            calling_process_cmdline(
-                indirect_sibling_start_times,
-                guess_git_blame_filename_extension
-            ),
-            Some("this".into())
+            calling_process_cmdline(indirect_sibling_start_times, describe_calling_process),
+            Some(CallingProcess::GitBlame(CommandLine {
+                long_options: [].into(),
+                short_options: [].into(),
+                last_arg: Some("src/main.this".into())
+            }))
         );
     }
 
@@ -1140,7 +1185,7 @@ pub mod tests {
         for (command, expected_extension) in [
             (
                 "/usr/local/bin/git show --abbrev-commit -w 775c3b84:./src/hello.rs",
-                "rs",
+                "hello.rs",
             ),
             (
                 "/usr/local/bin/git show --abbrev-commit -w HEAD~1:Makefile",
@@ -1148,7 +1193,7 @@ pub mod tests {
             ),
             (
                 "git -c x.y=z show --abbrev-commit -w 775c3b84:./src/hello.bye.R",
-                "R",
+                "hello.bye.R",
             ),
         ] {
             let parent = MockProcInfo::with(&[
@@ -1156,12 +1201,12 @@ pub mod tests {
                 (3, 100, command, Some(2)),
                 (4, 100, "delta", Some(3)),
             ]);
-            if let Some(CallingProcess::GitShow(cmd_line, ext)) =
+            if let Some(CallingProcess::GitShow(cmd_line, filename)) =
                 calling_process_cmdline(parent, describe_calling_process)
             {
                 assert_eq!(cmd_line.long_options, set(&["--abbrev-commit"]));
                 assert_eq!(cmd_line.short_options, set(&["-w"]));
-                assert_eq!(ext, Some(expected_extension.to_string()));
+                assert_eq!(filename, Some(expected_extension.to_string()));
             } else {
                 unreachable!();
             }

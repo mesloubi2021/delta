@@ -3,17 +3,25 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use bat::assets::HighlightingAssets;
-use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser};
+use clap::error::Error;
+use clap::{ArgMatches, ColorChoice, CommandFactory, FromArgMatches, Parser, ValueEnum, ValueHint};
+use clap_complete::Shell;
+use console::Term;
 use lazy_static::lazy_static;
 use syntect::highlighting::Theme as SyntaxTheme;
 use syntect::parsing::SyntaxSet;
 
+use crate::ansi::{ANSI_SGR_BOLD, ANSI_SGR_RESET, ANSI_SGR_UNDERLINE};
+use crate::color::ColorMode;
 use crate::config::delta_unreachable;
 use crate::env::DeltaEnv;
 use crate::git_config::GitConfig;
 use crate::options;
+use crate::subcommands;
 use crate::utils;
 use crate::utils::bat::output::PagingMode;
+
+const TERM_FALLBACK_WIDTH: usize = 79;
 
 #[derive(Parser)]
 #[command(
@@ -21,164 +29,9 @@ use crate::utils::bat::output::PagingMode;
     about = "A viewer for git and diff output",
     version,
     color = ColorChoice::Always,
-    term_width(0),
-    after_long_help = "\
-GIT CONFIG
-----------
-
-By default, delta takes settings from a section named \"delta\" in git config files, if one is present. The git config file to use for delta options will usually be ~/.gitconfig, but delta follows the rules given in https://git-scm.com/docs/git-config#FILES. Most delta options can be given in a git config file, using the usual option names but without the initial '--'. An example is
-
-[delta]
-    line-numbers = true
-    zero-style = dim syntax
-
-FEATURES
---------
-A feature is a named collection of delta options in git config. An example is:
-
-[delta \"my-delta-feature\"]
-    syntax-theme = Dracula
-    plus-style = bold syntax \"#002800\"
-
-To activate those options, you would use:
-
-delta --features my-delta-feature
-
-A feature name may not contain whitespace. You can activate multiple features:
-
-[delta]
-    features = my-highlight-styles-colors-feature my-line-number-styles-feature
-
-If more than one feature sets the same option, the last one wins.
-
-If an option is present in the [delta] section, then features are not considered at all.
-
-If you want an option to be fully overridable by a feature and also have a non default value when no features are used, then you need to define a \"default\" feature and include it in the main delta configuration.
-
-For instance:
-
-[delta]
-feature = default-feature
-
-[delta \"default-feature\"]
-width = 123
-
-At this point, you can override features set in the command line or in the environment variables and the \"last one wins\" rules will apply as expected.
-
-STYLES
-------
-
-All options that have a name like --*-style work the same way. It is very similar to how colors/styles are specified in a gitconfig file: https://git-scm.com/docs/git-config#Documentation/git-config.txt-color
-
-Here is an example:
-
---minus-style 'red bold ul \"#ffeeee\"'
-
-That means: For removed lines, set the foreground (text) color to 'red', make it bold and underlined, and set the background color to '#ffeeee'.
-
-See the COLORS section below for how to specify a color. In addition to real colors, there are 4 special color names: 'auto', 'normal', 'raw', and 'syntax'.
-
-Here is an example of using special color names together with a single attribute:
-
---minus-style 'syntax bold auto'
-
-That means: For removed lines, syntax-highlight the text, and make it bold, and do whatever delta normally does for the background.
-
-The available attributes are: 'blink', 'bold', 'dim', 'hidden', 'italic', 'reverse', 'strike', and 'ul' (or 'underline').
-
-The attribute 'omit' is supported by commit-style, file-style, and hunk-header-style, meaning to remove the element entirely from the output.
-
-A complete description of the style string syntax follows:
-
-- If the input that delta is receiving already has colors, and you want delta to output those colors unchanged, then use the special style string 'raw'. Otherwise, delta will strip any colors from its input.
-
-- A style string consists of 0, 1, or 2 colors, together with an arbitrary number of style attributes, all separated by spaces.
-
-- The first color is the foreground (text) color. The second color is the background color. Attributes can go in any position.
-
-- This means that in order to specify a background color you must also specify a foreground (text) color.
-
-- If you want delta to choose one of the colors automatically, then use the special color 'auto'. This can be used for both foreground and background.
-
-- If you want the foreground/background color to be your terminal's foreground/background color, then use the special color 'normal'.
-
-- If you want the foreground text to be syntax-highlighted according to its language, then use the special foreground color 'syntax'. This can only be used for the foreground (text).
-
-- The minimal style specification is the empty string ''. This means: do not apply any colors or styling to the element in question.
-
-COLORS
-------
-
-There are four ways to specify a color (this section applies to foreground and background colors within a style string):
-
-1. CSS color name
-
-   Any of the 140 color names used in CSS: https://www.w3schools.com/colors/colors_groups.asp
-
-2. RGB hex code
-
-   An example of using an RGB hex code is:
-   --file-style=\"#0e7c0e\"
-
-3. ANSI color name
-
-   There are 8 ANSI color names:
-   black, red, green, yellow, blue, magenta, cyan, white.
-
-   In addition, all of them have a bright form:
-   brightblack, brightred, brightgreen, brightyellow, brightblue, brightmagenta, brightcyan, brightwhite.
-
-   An example of using an ANSI color name is:
-   --file-style=\"green\"
-
-   Unlike RGB hex codes, ANSI color names are just names: you can choose the exact color that each name corresponds to in the settings of your terminal application (the application you use to enter commands at a shell prompt). This means that if you use ANSI color names, and you change the color theme used by your terminal, then delta's colors will respond automatically, without needing to change the delta command line.
-
-   \"purple\" is accepted as a synonym for \"magenta\". Color names and codes are case-insensitive.
-
-4. ANSI color number
-
-   An example of using an ANSI color number is:
-   --file-style=28
-
-   There are 256 ANSI color numbers: 0-255. The first 16 are the same as the colors described in the \"ANSI color name\" section above. See https://en.wikipedia.org/wiki/ANSI_escape_code#8-bit. Specifying colors like this is useful if your terminal only supports 256 colors (i.e. doesn\'t support 24-bit color).
-
-
-LINE NUMBERS
-------------
-
-To display line numbers, use --line-numbers.
-
-Line numbers are displayed in two columns. Here's what it looks like by default:
-
-  1 ⋮  1 │ unchanged line
-  2 ⋮    │ removed line
-    ⋮  2 │ added line
-
-In that output, the line numbers for the old (minus) version of the file appear in the left column, and the line numbers for the new (plus) version of the file appear in the right column. In an unchanged (zero) line, both columns contain a line number.
-
-The following options allow the line number display to be customized:
-
---line-numbers-left-format:  Change the contents of the left column
---line-numbers-right-format: Change the contents of the right column
---line-numbers-left-style:   Change the style applied to the left column
---line-numbers-right-style:  Change the style applied to the right column
---line-numbers-minus-style:  Change the style applied to line numbers in minus lines
---line-numbers-zero-style:   Change the style applied to line numbers in unchanged lines
---line-numbers-plus-style:   Change the style applied to line numbers in plus lines
-
-Options --line-numbers-left-format and --line-numbers-right-format allow you to change the contents of the line number columns. Their values are arbitrary format strings, which are allowed to contain the placeholders {nm} for the line number associated with the old version of the file and {np} for the line number associated with the new version of the file. The placeholders support a subset of the string formatting syntax documented here: https://doc.rust-lang.org/std/fmt/#formatting-parameters. Specifically, you can use the alignment and width syntax.
-
-For example, the default value of --line-numbers-left-format is '{nm:^4}⋮'. This means that the left column should display the minus line number (nm), center-aligned, padded with spaces to a width of 4 characters, followed by a unicode dividing-line character (⋮).
-
-Similarly, the default value of --line-numbers-right-format is '{np:^4}│'. This means that the right column should display the plus line number (np), center-aligned, padded with spaces to a width of 4 characters, followed by a unicode dividing-line character (│).
-
-Use '<' for left-align, '^' for center-align, and '>' for right-align.
-
-
-If something isn't working correctly, or you have a feature request, please open an issue at https://github.com/dandavison/delta/issues.
-
-For a short help summary, please use delta -h.
-"
+    // output is wrapped by delta later:
+    term_width = usize::MAX,
+    max_term_width = usize::MAX,
 )]
 pub struct Opt {
     #[arg(long = "blame-code-style", value_name = "STYLE")]
@@ -240,7 +93,7 @@ pub struct Opt {
     /// the `strftime` format syntax specification. If it is not present, the timestamps will
     /// be formatted in a human-friendly but possibly less accurate form.
     ///
-    /// See: (https://docs.rs/chrono/latest/chrono/format/strftime/index.html)
+    /// See: <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>
     pub blame_timestamp_output_format: Option<String>,
 
     #[arg(long = "color-only")]
@@ -250,7 +103,7 @@ pub struct Opt {
     /// intended for other tools that use delta.
     pub color_only: bool,
 
-    #[arg(long = "config", default_value = "", value_name = "PATH")]
+    #[arg(long = "config", default_value = "", value_name = "PATH", value_hint = ValueHint::FilePath)]
     /// Load the config file at PATH instead of ~/.gitconfig.
     pub config: String,
 
@@ -286,23 +139,61 @@ pub struct Opt {
     /// For more control, see the style options and --syntax-theme.
     pub dark: bool,
 
-    #[arg(long = "default-language", value_name = "LANG")]
+    #[arg(long = "default-language", value_name = "LANG", default_value = "txt")]
     /// Default language used for syntax highlighting.
     ///
-    /// Used when the language cannot be inferred from a filename. It will typically make sense to
-    /// set this in per-repository git config (.git/config)
-    pub default_language: Option<String>,
+    /// Used as a fallback when the language cannot be inferred from a filename. It will
+    /// typically make sense to set this in the per-repository config file '.git/config'.
+    pub default_language: String,
+
+    /// Detect whether or not the terminal is dark or light by querying for its colors.
+    ///
+    /// Ignored if either `--dark` or `--light` is specified.
+    ///
+    /// Querying the terminal for its colors requires "exclusive" access
+    /// since delta reads/writes from the terminal and enables/disables raw mode.
+    /// This causes race conditions with pagers such as less when they are attached to the
+    /// same terminal as delta.
+    ///
+    /// This is usually only an issue when the output is manually piped to a pager.
+    /// For example: `git diff | delta | less`.
+    /// Otherwise, if delta starts the pager itself, then there's no race condition
+    /// since the pager is started *after* the color is detected.
+    ///
+    /// `auto` tries to account for these situations by testing if the output is redirected.
+    ///
+    /// The `--color-only` option is treated as an indicator that delta is used
+    /// as `interactive.diffFilter`. In this case the color is queried from the terminal even
+    /// though the output is redirected.
+    ///
+    #[arg(long = "detect-dark-light", value_enum, default_value_t = DetectDarkLight::default())]
+    pub detect_dark_light: DetectDarkLight,
+
+    #[arg(
+        long = "diff-args",
+        short = '@',
+        default_value = "",
+        value_name = "STRING"
+    )]
+    /// Extra arguments to pass to `git diff` when using delta to diff two files.
+    ///
+    /// E.g. `delta --diff-args=-U999 file_1 file_2` is equivalent to
+    /// `git diff --no-index --color -U999 file_1 file_2 | delta`.
+    ///
+    /// If you use process substitution (`delta <(command_1) <(command_2)`) and your git version
+    /// doesn't support it, then delta will fall back to `diff` instead of `git diff`.
+    pub diff_args: String,
 
     #[arg(long = "diff-highlight")]
     /// Emulate diff-highlight.
     ///
-    /// (https://github.com/git/git/tree/master/contrib/diff-highlight)
+    /// <https://github.com/git/git/tree/master/contrib/diff-highlight>
     pub diff_highlight: bool,
 
     #[arg(long = "diff-so-fancy")]
     /// Emulate diff-so-fancy.
     ///
-    /// (https://github.com/so-fancy/diff-so-fancy)
+    /// <https://github.com/so-fancy/diff-so-fancy>
     pub diff_so_fancy: bool,
 
     #[arg(long = "diff-stat-align-width", default_value = "48", value_name = "N")]
@@ -390,6 +281,10 @@ pub struct Opt {
     /// Sed-style command transforming file paths for display.
     pub file_regex_replacement: Option<String>,
 
+    #[arg(long = "generate-completion")]
+    /// Print completion file for the given shell.
+    pub generate_completion: Option<Shell>,
+
     #[arg(long = "grep-context-line-style", value_name = "STYLE")]
     /// Style string for non-matching lines of grep output.
     ///
@@ -409,7 +304,7 @@ pub struct Opt {
     #[arg(long = "grep-header-decoration-style", value_name = "STYLE")]
     /// Style string for the header decoration in grep output.
     ///
-    /// Default is "none" when grep-ouput-type-is "ripgrep", otherwise defaults
+    /// Default is "none" when grep-output-type-is "ripgrep", otherwise defaults
     /// to value of header-decoration-style. See hunk-header-decoration-style.
     pub grep_header_decoration_style: Option<String>,
 
@@ -429,7 +324,7 @@ pub struct Opt {
     /// See STYLES section.
     pub grep_line_number_style: String,
 
-    #[arg(long = "grep-output-type", value_name = "OUTPUT_TYPE")]
+    #[arg(long = "grep-output-type", value_name = "OUTPUT_TYPE", value_parser = ["ripgrep", "classic"])]
     /// Grep output format. Possible values:
     /// "ripgrep" - file name printed once, followed by matching lines within that file, each preceded by a line number.
     /// "classic" - file name:line number, followed by matching line.
@@ -515,14 +410,14 @@ pub struct Opt {
     /// Render commit hashes, file names, and line numbers as hyperlinks.
     ///
     /// Following the hyperlink spec for terminal emulators:
-    /// https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda. By default, file names
+    /// <https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda>. By default, file names
     /// and line numbers link to the local file using a file URL, whereas commit hashes link to the
     /// commit in GitHub, if the remote repository is hosted by GitHub. See
     /// --hyperlinks-file-link-format for full control over the file URLs emitted. Hyperlinks are
-    /// supported by several common terminal emulators. To make them work, you must use less version
-    /// >= 581 with the -R flag (or use -r with older less versions, but this will break e.g.
-    /// --navigate). If you use tmux, then you will also need a patched fork of tmux (see
-    /// https://github.com/dandavison/tmux).
+    /// supported by several common terminal emulators. To make them work, you must use less
+    /// version >= 581 with the -R flag (or use -r with older less versions, but this will break
+    /// e.g. --navigate). If you use tmux, then you will also need a patched fork of tmux (see
+    /// <https://github.com/dandavison/tmux>).
     pub hyperlinks: bool,
 
     #[arg(long = "hyperlinks-commit-link-format", value_name = "FMT")]
@@ -539,14 +434,12 @@ pub struct Opt {
     )]
     /// Format string for file hyperlinks (requires --hyperlinks).
     ///
-    /// The placeholders "{path}" and "{line}" will be replaced by the absolute file path and the
-    /// line number, respectively. The default value of this option creates hyperlinks using
-    /// standard file URLs; your operating system should open these in the application registered
-    /// for that file type. However, these do not make use of the line number. In order for the link
-    /// to open the file at the correct line number, you could use a custom URL format such as
-    /// "file-line://{path}:{line}" and register an application to handle the custom "file-line" URL
-    /// scheme by opening the file in your editor/IDE at the indicated line number. See
-    /// https://github.com/dandavison/open-in-editor for an example.
+    /// Placeholders "{path}" and "{line}" will be replaced by the absolute file path and the line
+    /// number; "{host}" with the hostname delta is currently running on. The default is to create
+    /// a hyperlink containing a standard file URI with only the filename, which your terminal or
+    /// OS should handle. You can specify any scheme, such as "file-line://{path}:{line}" and
+    /// register an application to handle it. See
+    /// <https://dandavison.github.io/delta/hyperlinks.html> for details.
     pub hyperlinks_file_link_format: String,
 
     #[arg(
@@ -563,7 +456,8 @@ pub struct Opt {
     #[arg(
         long = "inspect-raw-lines",
         default_value = "true",
-        value_name = "true|false"
+        value_name = "true|false",
+        value_parser = ["true", "false"],
     )]
     /// Kill-switch for --color-moved support.
     ///
@@ -595,7 +489,7 @@ pub struct Opt {
     /// affect delta's performance when entire files are added/removed.
     pub line_buffer_size: usize,
 
-    #[arg(long = "line-fill-method", value_name = "STRING")]
+    #[arg(long = "line-fill-method", value_name = "STRING", value_parser = ["ansi", "spaces"])]
     /// Line-fill method in side-by-side mode.
     ///
     /// How to extend the background color to the end of the line in side-by-side mode. Can be ansi
@@ -705,12 +599,22 @@ pub struct Opt {
     /// insertion operations transforming one into the other.
     pub max_line_distance: f64,
 
-    #[arg(long = "max-line-length", default_value = "512", value_name = "N")]
+    #[arg(
+        long = "max-syntax-highlighting-length",
+        default_value = "400",
+        value_name = "N"
+    )]
+    /// Stop syntax highlighting lines after this many characters.
+    ///
+    /// To always highlight entire lines, set to zero - but note that delta will be slow on very
+    /// long lines (e.g. minified .js).
+    pub max_syntax_length: usize,
+
+    #[arg(long = "max-line-length", default_value = "3000", value_name = "N")]
     /// Truncate lines longer than this.
     ///
-    /// To prevent any truncation, set to zero. Note that delta will be slow on very long lines
-    /// (e.g. minified .js) if truncation is disabled. When wrapping lines it is automatically set
-    /// to fit at least all visible characters.
+    /// To prevent any truncation, set to zero. When wrapping lines this does nothing as it is
+    /// overwritten to fit at least all visible characters, see `--wrap-max-lines`.
     pub max_line_length: usize,
 
     #[arg(
@@ -822,7 +726,7 @@ pub struct Opt {
     /// Activate diff navigation.
     ///
     /// Use n to jump forwards and N to jump backwards. To change the file labels used see
-    /// --file-modified-label, --file-removed-label, --file-added-label, --file-renamed-label.
+    /// --file-added-label, --file-copied-label, --file-modified-label, --file-removed-label, --file-renamed-label.
     pub navigate: bool,
 
     #[arg(long = "navigate-regex", value_name = "REGEX")]
@@ -846,7 +750,8 @@ pub struct Opt {
     #[arg(
         long = "paging",
         default_value = "auto",
-        value_name = "auto|always|never"
+        value_name = "auto|always|never",
+        value_parser = ["auto", "always", "never"],
     )]
     /// Whether to use a pager when displaying output.
     ///
@@ -944,7 +849,7 @@ pub struct Opt {
     /// Show example diff for available delta themes.
     ///
     /// A delta theme is a delta named feature (see --features) that sets either `light` or `dark`.
-    /// See https://github.com/dandavison/delta#custom-color-themes. If diff output is supplied on
+    /// See <https://github.com/dandavison/delta#custom-color-themes>. If diff output is supplied on
     /// standard input then this will be used for the demo. For example: `git show | delta
     /// --show-themes`. By default shows dark or light themes only, according to whether delta is in
     /// dark or light mode (as set by the user or inferred from BAT_THEME). To control the themes
@@ -975,7 +880,8 @@ pub struct Opt {
     #[arg(
         long = "true-color",
         default_value = "auto",
-        value_name = "auto|always|never"
+        value_name = "auto|always|never",
+        value_parser = ["auto", "always", "never"],
     )]
     /// Whether to emit 24-bit ("true color") RGB color codes.
     ///
@@ -1066,16 +972,16 @@ pub struct Opt {
     /// See STYLES section.
     pub zero_style: String,
 
-    #[arg(long = "24-bit-color", value_name = "auto|always|never")]
+    #[arg(long = "24-bit-color", value_name = "auto|always|never", value_parser = ["auto", "always", "never"])]
     /// Deprecated: use --true-color.
     pub _24_bit_color: Option<String>,
 
-    /// First file to be compared when delta is being used in diff mode
+    /// First file to be compared when delta is being used to diff two files.
     ///
-    /// `delta file_1 file_2` is equivalent to `diff -u file_1 file_2 | delta`.
+    /// `delta file1 file2` is equivalent to `diff -u file1 file2 | delta`.
     pub minus_file: Option<PathBuf>,
 
-    /// Second file to be compared when delta is being used in diff mode.
+    /// Second file to be compared when delta is being used to diff two files.
     pub plus_file: Option<PathBuf>,
 
     #[arg(skip)]
@@ -1088,6 +994,186 @@ pub struct Opt {
     pub env: DeltaEnv,
 }
 
+fn get_after_long_help(is_term: bool, no_indent: &str, no_wrap: &str) -> String {
+    let i0 = no_indent;
+    let l = no_wrap;
+
+    #[allow(non_snake_case)]
+    // <H>header</H> and  <u>underline</u>
+    let (H_, _H, u_, _u) = if is_term {
+        (
+            format!("{ANSI_SGR_BOLD}{ANSI_SGR_UNDERLINE}"),
+            ANSI_SGR_RESET,
+            ANSI_SGR_UNDERLINE,
+            ANSI_SGR_RESET,
+        )
+    } else {
+        ("".to_string(), "", "", "")
+    };
+
+    format!(
+        r##"
+
+{i0}{H_}Git config{_H}
+
+By default, delta takes settings from a section named "delta" in git config files, if one is present. The git config file to use for delta options will usually be ~/.gitconfig, but delta follows the rules given in <https://git-scm.com/docs/git-config#FILES>. Most delta options can be given in a git config file, using the usual option names but without the initial '--'. An example is
+
+[delta]
+    line-numbers = true
+    zero-style = dim syntax
+
+
+{i0}{H_}Features{_H}
+
+A feature is a named collection of delta options in git config. An example is:
+
+[delta "my-delta-feature"]
+    syntax-theme = Dracula
+    plus-style = bold syntax "#002800"
+
+To activate those options, you would use:
+
+delta --features my-delta-feature
+
+A feature name may not contain whitespace. You can activate multiple features:
+
+{l}[delta]
+{l}    features = my-highlight-styles-colors-feature my-line-number-styles-feature
+
+If more than one feature sets the same option, the last one wins.
+
+If an option is present in the [delta] section, then features are not considered at all.
+
+If you want an option to be fully overridable by a feature and also have a non default value when no features are used, then you need to define a "default" feature and include it in the main delta configuration.
+
+For instance:
+
+[delta]
+    feature = default-feature
+
+[delta "default-feature"]
+    width = 123
+
+At this point, you can override features set in the command line or in the environment variables and the "last one wins" rules will apply as expected.
+
+
+{i0}{H_}Styles{_H}
+
+All options that have a name like --*-style work the same way. It is very similar to how colors/styles are specified in a gitconfig file: <https://git-scm.com/docs/git-config#Documentation/git-config.txt-color>
+
+Here is an example:
+
+--minus-style 'red bold ul "#ffeeee"'
+
+That means: For removed lines, set the foreground (text) color to 'red', make it bold and underlined, and set the background color to '#ffeeee'.
+
+See the {u_}Colors{_u} section below for how to specify a color. In addition to real colors, there are 4 special color names: 'auto', 'normal', 'raw', and 'syntax'.
+
+Here is an example of using special color names together with a single attribute:
+
+--minus-style 'syntax bold auto'
+
+That means: For removed lines, syntax-highlight the text, and make it bold, and do whatever delta normally does for the background.
+
+The available attributes are: 'blink', 'bold', 'dim', 'hidden', 'italic', 'reverse', 'strike', and 'ul' (or 'underline').
+
+The attribute 'omit' is supported by commit-style, file-style, and hunk-header-style, meaning to remove the element entirely from the output.
+
+A complete description of the style string syntax follows:
+
+- If the input that delta is receiving already has colors, and you want delta to output those colors unchanged, then use the special style string 'raw'. Otherwise, delta will strip any colors from its input.
+
+- A style string consists of 0, 1, or 2 colors, together with an arbitrary number of style attributes, all separated by spaces.
+
+- The first color is the foreground (text) color. The second color is the background color. Attributes can go in any position.
+
+- This means that in order to specify a background color you must also specify a foreground (text) color.
+
+- If you want delta to choose one of the colors automatically, then use the special color 'auto'. This can be used for both foreground and background.
+
+- If you want the foreground/background color to be your terminal's foreground/background color, then use the special color 'normal'.
+
+- If you want the foreground text to be syntax-highlighted according to its language, then use the special foreground color 'syntax'. This can only be used for the foreground (text).
+
+- The minimal style specification is the empty string ''. This means: do not apply any colors or styling to the element in question.
+
+
+{i0}{H_}Colors{_H}
+
+There are four ways to specify a color (this section applies to foreground and background colors within a style string):
+
+1. CSS color name
+
+   Any of the 140 color names used in CSS: <https://www.w3schools.com/colors/colors_groups.asp>
+
+2. RGB hex code
+
+   An example of using an RGB hex code is:
+   --file-style="#0e7c0e"
+
+3. ANSI color name
+
+   There are 8 ANSI color names:
+   black, red, green, yellow, blue, magenta, cyan, white.
+
+   In addition, all of them have a bright form:
+   brightblack, brightred, brightgreen, brightyellow, brightblue, brightmagenta, brightcyan, brightwhite.
+
+   An example of using an ANSI color name is:
+   --file-style="green"
+
+   Unlike RGB hex codes, ANSI color names are just names: you can choose the exact color that each name corresponds to in the settings of your terminal application (the application you use to enter commands at a shell prompt). This means that if you use ANSI color names, and you change the color theme used by your terminal, then delta's colors will respond automatically, without needing to change the delta command line.
+
+   "purple" is accepted as a synonym for "magenta". Color names and codes are case-insensitive.
+
+4. ANSI color number
+
+   An example of using an ANSI color number is:
+   --file-style=28
+
+   There are 256 ANSI color numbers: 0-255. The first 16 are the same as the colors described in the "ANSI color name" section above. See <https://en.wikipedia.org/wiki/ANSI_escape_code#8-bit>. Specifying colors like this is useful if your terminal only supports 256 colors (i.e. doesn't support 24-bit color).
+
+
+{i0}{H_}Line Numbers{_H}
+
+To display line numbers, use --line-numbers.
+
+Line numbers are displayed in two columns. Here's what it looks like by default:
+
+  1 ⋮  1 │ unchanged line
+  2 ⋮    │ removed line
+    ⋮  2 │ added line
+
+In that output, the line numbers for the old (minus) version of the file appear in the left column, and the line numbers for the new (plus) version of the file appear in the right column. In an unchanged (zero) line, both columns contain a line number.
+
+The following options allow the line number display to be customized:
+
+--line-numbers-left-format:  Change the contents of the left column
+--line-numbers-right-format: Change the contents of the right column
+--line-numbers-left-style:   Change the style applied to the left column
+--line-numbers-right-style:  Change the style applied to the right column
+--line-numbers-minus-style:  Change the style applied to line numbers in minus lines
+--line-numbers-zero-style:   Change the style applied to line numbers in unchanged lines
+--line-numbers-plus-style:   Change the style applied to line numbers in plus lines
+
+Options --line-numbers-left-format and --line-numbers-right-format allow you to change the contents of the line number columns. Their values are arbitrary format strings, which are allowed to contain the placeholders {{nm}} for the line number associated with the old version of the file and {{np}} for the line number associated with the new version of the file. The placeholders support a subset of the string formatting syntax documented here: <https://doc.rust-lang.org/std/fmt/#formatting-parameters>. Specifically, you can use the alignment and width syntax.
+
+For example, the default value of --line-numbers-left-format is '{{nm:^4}}⋮'. This means that the left column should display the minus line number (nm), center-aligned, padded with spaces to a width of 4 characters, followed by a unicode dividing-line character (⋮).
+
+Similarly, the default value of --line-numbers-right-format is '{{np:^4}}│'. This means that the right column should display the plus line number (np), center-aligned, padded with spaces to a width of 4 characters, followed by a unicode dividing-line character (│).
+
+Use '<' for left-align, '^' for center-align, and '>' for right-align.
+
+
+{i0}{H_}Support{_H}
+
+If something isn't working correctly, or you have a feature request, please open an issue at <https://github.com/dandavison/delta/issues>.
+
+For a short help summary, please use delta -h.
+"##
+    )
+}
+
 #[derive(Default, Clone, Debug)]
 pub struct ComputedValues {
     pub available_terminal_width: usize,
@@ -1095,7 +1181,7 @@ pub struct ComputedValues {
     pub background_color_extends_to_terminal_width: bool,
     pub decorations_width: Width,
     pub inspect_raw_lines: InspectRawLines,
-    pub is_light_mode: bool,
+    pub color_mode: ColorMode,
     pub paging_mode: PagingMode,
     pub syntax_set: SyntaxSet,
     pub syntax_theme: Option<SyntaxTheme>,
@@ -1116,27 +1202,146 @@ pub enum InspectRawLines {
     False,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum DetectDarkLight {
+    /// Only query the terminal for its colors if the output is not redirected.
+    #[default]
+    Auto,
+    /// Always query the terminal for its colors.
+    Always,
+    /// Never query the terminal for its colors.
+    Never,
+}
+
+// Which call path to take
+#[derive(Debug)]
+pub enum Call<T> {
+    Delta(T),
+    DeltaDiff(T, PathBuf, PathBuf),
+    SubCommand(T, subcommands::SubCommand),
+    Help(String),
+    Version(String),
+}
+
 impl Opt {
+    fn handle_help_and_version(args: &[OsString]) -> Call<ArgMatches> {
+        match Self::command().try_get_matches_from(args) {
+            Err(e) if e.kind() == clap::error::ErrorKind::DisplayVersion => {
+                let version = Self::command().render_version();
+                Call::Version(version)
+            }
+            Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => {
+                let term = Term::stdout();
+                // No wrapping if short -h instead of --help was used:
+                if args.iter().any(|arg| arg == "-h") {
+                    let help_clap = Self::command().render_help();
+                    return Call::Help(if term.is_term() {
+                        help_clap.ansi().to_string()
+                    } else {
+                        help_clap.to_string()
+                    });
+                }
+
+                let help_clap = Self::command().render_long_help();
+                let (help_clap, wrap_width) = if term.is_term() {
+                    (
+                        help_clap.ansi().to_string(),
+                        utils::workarounds::windows_msys2_width_fix(term.size(), &term),
+                    )
+                } else {
+                    (help_clap.to_string(), TERM_FALLBACK_WIDTH)
+                };
+
+                // Stop wrapping for very narrow terminals, and leave a 2 wide margin on the right.
+                let wrap_width =
+                    wrap_width.clamp(TERM_FALLBACK_WIDTH - 22, TERM_FALLBACK_WIDTH + 22) - 2;
+
+                let mut help = utils::helpwrap::wrap(&help_clap, wrap_width, "", "", "");
+                let indent_with = "  ";
+                let no_indent = ":no_Indent:";
+                let no_wrap = ":no_Wrap:";
+                let after_help = utils::helpwrap::wrap(
+                    &get_after_long_help(term.is_term(), no_indent, no_wrap),
+                    wrap_width,
+                    indent_with,
+                    no_indent,
+                    no_wrap,
+                );
+                help.push_str(&after_help);
+
+                Call::Help(help)
+            }
+            Err(e) => {
+                // Calls `e.exit()` if error persists.
+                let (matches, subcmd) = subcommands::extract(args, e);
+                Call::SubCommand(matches, subcmd)
+            }
+            Ok(matches) => {
+                // subcommands take precedence over diffs
+                let minus_file = matches.get_one::<PathBuf>("minus_file").map(PathBuf::from);
+                if let Some(subcmd) = &minus_file {
+                    if let Some(arg) = subcmd.to_str() {
+                        if subcommands::SUBCOMMANDS.contains(&arg) {
+                            let unreachable_error =
+                                Error::new(clap::error::ErrorKind::InvalidSubcommand);
+                            let (matches, subcmd) = subcommands::extract(args, unreachable_error);
+                            return Call::SubCommand(matches, subcmd);
+                        }
+                    }
+                }
+
+                match (
+                    minus_file,
+                    matches.get_one::<PathBuf>("plus_file").map(PathBuf::from),
+                ) {
+                    (Some(minus_file), Some(plus_file)) => {
+                        Call::DeltaDiff(matches, minus_file, plus_file)
+                    }
+                    _ => Call::Delta(matches),
+                }
+            }
+        }
+    }
+
     pub fn from_args_and_git_config(
-        env: DeltaEnv,
-        git_config: Option<GitConfig>,
+        args: Vec<OsString>,
+        env: &DeltaEnv,
         assets: HighlightingAssets,
-    ) -> Self {
-        let mut final_config = git_config;
-        let matches = Self::command().get_matches();
+    ) -> (Call<()>, Option<Opt>) {
+        #[cfg(test)]
+        // Set argv[0] when called in tests:
+        let args = {
+            let mut args = args;
+            args.insert(0, OsString::from("delta"));
+            args
+        };
+        let (matches, call) = match Self::handle_help_and_version(&args) {
+            Call::Delta(t) => (t, Call::Delta(())),
+            Call::DeltaDiff(t, a, b) => (t, Call::DeltaDiff((), a, b)),
+            Call::SubCommand(t, cmd) => (t, Call::SubCommand((), cmd)),
+            Call::Help(help) => return (Call::Help(help), None),
+            Call::Version(ver) => return (Call::Version(ver), None),
+        };
+
+        let mut final_config = if *matches.get_one::<bool>("no_gitconfig").unwrap_or(&false) {
+            None
+        } else {
+            GitConfig::try_create(env)
+        };
 
         if let Some(path) = matches.get_one::<String>("config") {
             if !path.is_empty() {
                 let path = Path::new(path);
-                final_config = Some(GitConfig::from_path(&env, path, true));
+                final_config = Some(GitConfig::from_path(env, path, true));
             }
         }
 
-        Self::from_clap_and_git_config(env, matches, final_config, assets)
+        let opt = Self::from_clap_and_git_config(env, matches, final_config, assets);
+        (call, Some(opt))
     }
 
     pub fn from_iter_and_git_config<I>(
-        env: DeltaEnv,
+        env: &DeltaEnv,
         iter: I,
         git_config: Option<GitConfig>,
     ) -> Self
@@ -1154,14 +1359,14 @@ impl Opt {
     }
 
     fn from_clap_and_git_config(
-        env: DeltaEnv,
+        env: &DeltaEnv,
         arg_matches: clap::ArgMatches,
         mut git_config: Option<GitConfig>,
         assets: HighlightingAssets,
     ) -> Self {
         let mut opt = Opt::from_arg_matches(&arg_matches)
             .unwrap_or_else(|_| delta_unreachable("Opt::from_arg_matches failed"));
-        opt.env = env;
+        opt.env = env.clone();
         options::set::set_options(&mut opt, &mut git_config, &arg_matches, assets);
         opt.git_config = git_config;
         opt
@@ -1194,6 +1399,7 @@ impl Opt {
 // pseudo-flag commands such as --list-languages
 lazy_static! {
     static ref IGNORED_OPTION_NAMES: HashSet<&'static str> = vec![
+        "generate-completion",
         "list-languages",
         "list-syntax-themes",
         "show-config",

@@ -17,17 +17,14 @@ end-to-end-test: build
 	./tests/test_deprecated_options > /dev/null
 	./tests/test_navigate_less_history_file
 
+shell-completion:
+	for shell in bash fish zsh; do ./target/release/delta --generate-completion $$shell > etc/completion/completion.$$shell; done
+
 release:
 	@make -f release.Makefile release
 
 version:
 	@grep version Cargo.toml | head -n1 | sed -E 's,.*version = "([^"]+)",\1,'
-
-hash:
-	@version=$$(make version) && \
-	printf "$$version-tar.gz %s\n" $$(curl -sL https://github.com/dandavison/delta/archive/$$version.tar.gz | sha256sum -) && \
-	printf "delta-$$version-x86_64-apple-darwin.tar.gz %s\n" $$(curl -sL https://github.com/dandavison/delta/releases/download/$$version/delta-$$version-x86_64-apple-darwin.tar.gz | sha256sum -) && \
-	printf "delta-$$version-x86_64-unknown-linux-musl.tar.gz %s\n" $$(curl -sL https://github.com/dandavison/delta/releases/download/$$version/delta-$$version-x86_64-unknown-linux-musl.tar.gz | sha256sum -)
 
 BENCHMARK_INPUT_FILE = /tmp/delta-benchmark-input.gitdiff
 BENCHMARK_COMMAND = git log -p 23c292d3f25c67082a2ba315a187268be1a9b0ab
@@ -44,4 +41,4 @@ flamegraph: build
 chronologer:
 	chronologer etc/performance/chronologer.yaml
 
-.PHONY: build format lint test unit-test end-to-end-test release version hash benchmark flamegraph chronologer
+.PHONY: build format lint test unit-test end-to-end-test release shell-completion version benchmark flamegraph chronologer

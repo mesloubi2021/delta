@@ -3,6 +3,7 @@ use std::cmp::max;
 use lazy_static::lazy_static;
 use regex::Regex;
 
+use crate::color::ColorMode::*;
 use crate::config;
 use crate::delta::State;
 use crate::features::hyperlinks;
@@ -38,26 +39,27 @@ pub fn make_feature() -> Vec<(String, OptionValueFunction)> {
             "line-numbers-minus-style",
             String,
             None,
-            opt => if opt.computed.is_light_mode {
-                "red".to_string()
-            } else {
-                "88".to_string()
+            opt => match opt.computed.color_mode {
+                Light => "red",
+                Dark => "88",
             }
         ),
         (
             "line-numbers-zero-style",
             String,
             None,
-            opt => if opt.computed.is_light_mode {"#dddddd"} else {"#444444"}
+            opt => match opt.computed.color_mode {
+                Light => "#dddddd",
+                Dark => "#444444",
+            }
         ),
         (
             "line-numbers-plus-style",
             String,
             None,
-            opt => if opt.computed.is_light_mode {
-                "green".to_string()
-            } else {
-                "28".to_string()
+            opt => match opt.computed.color_mode {
+                Light => "green",
+                Dark => "28",
             }
         )
     ])
@@ -142,7 +144,8 @@ pub fn format_and_paint_line_numbers<'a>(
 }
 
 lazy_static! {
-    static ref LINE_NUMBERS_PLACEHOLDER_REGEX: Regex = format::make_placeholder_regex(&["nm", "np"]);
+    static ref LINE_NUMBERS_PLACEHOLDER_REGEX: Regex =
+        format::make_placeholder_regex(&["nm", "np"]);
 }
 
 #[derive(Default, Debug)]
@@ -618,7 +621,7 @@ pub mod tests {
         assert_eq!(data.formatted_width(), MinusPlus::new(32, 0));
     }
 
-    fn _get_capture<'a>(i: usize, j: usize, caps: &'a Vec<Captures>) -> &'a str {
+    fn _get_capture<'a>(i: usize, j: usize, caps: &'a [Captures]) -> &'a str {
         caps[i].get(j).map_or("", |m| m.as_str())
     }
 

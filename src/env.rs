@@ -19,6 +19,7 @@ pub struct DeltaEnv {
     pub features: Option<String>,
     pub git_config_parameters: Option<String>,
     pub git_prefix: Option<String>,
+    pub hostname: Option<String>,
     pub navigate: Option<String>,
     pub pagers: (Option<String>, Option<String>),
 }
@@ -33,6 +34,7 @@ impl DeltaEnv {
         let features = env::var(DELTA_FEATURES).ok();
         let git_config_parameters = env::var(GIT_CONFIG_PARAMETERS).ok();
         let git_prefix = env::var(GIT_PREFIX).ok();
+        let hostname = hostname();
         let navigate = env::var(DELTA_NAVIGATE).ok();
 
         let current_dir = env::current_dir().ok();
@@ -53,27 +55,42 @@ impl DeltaEnv {
             features,
             git_config_parameters,
             git_prefix,
+            hostname,
             navigate,
             pagers,
         }
     }
 }
 
+fn hostname() -> Option<String> {
+    grep_cli::hostname().ok()?.to_str().map(|s| s.to_string())
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::DeltaEnv;
+    use lazy_static::lazy_static;
     use std::env;
+    use std::sync::{Arc, Mutex};
+
+    lazy_static! {
+        static ref ENV_ACCESS: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+    }
 
     #[test]
     fn test_env_parsing() {
+        let _guard = ENV_ACCESS.lock().unwrap();
         let feature = "Awesome Feature";
         env::set_var("DELTA_FEATURES", feature);
         let env = DeltaEnv::init();
         assert_eq!(env.features, Some(feature.into()));
+        // otherwise `current_dir` is not used in the test cfg:
+        assert_eq!(env.current_dir, env::current_dir().ok());
     }
 
     #[test]
     fn test_env_parsing_with_pager_set_to_bat() {
+        let _guard = ENV_ACCESS.lock().unwrap();
         env::set_var("PAGER", "bat");
         let env = DeltaEnv::init();
         assert_eq!(
@@ -86,6 +103,7 @@ pub mod tests {
 
     #[test]
     fn test_env_parsing_with_pager_set_to_more() {
+        let _guard = ENV_ACCESS.lock().unwrap();
         env::set_var("PAGER", "more");
         let env = DeltaEnv::init();
         assert_eq!(env.pagers.1, Some("less".into()));
@@ -93,6 +111,7 @@ pub mod tests {
 
     #[test]
     fn test_env_parsing_with_pager_set_to_most() {
+        let _guard = ENV_ACCESS.lock().unwrap();
         env::set_var("PAGER", "most");
         let env = DeltaEnv::init();
         assert_eq!(env.pagers.1, Some("less".into()));

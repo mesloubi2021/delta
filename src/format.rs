@@ -17,8 +17,8 @@ impl<'a> TryFrom<Option<&'a str>> for Placeholder<'a> {
     type Error = ();
     fn try_from(from: Option<&'a str>) -> Result<Self, Self::Error> {
         match from {
-            Some(placeholder) if placeholder == "nm" => Ok(Placeholder::NumberMinus),
-            Some(placeholder) if placeholder == "np" => Ok(Placeholder::NumberPlus),
+            Some("nm") => Ok(Placeholder::NumberMinus),
+            Some("np") => Ok(Placeholder::NumberPlus),
             Some(placeholder) => Ok(Placeholder::Str(placeholder)),
             _ => Err(()),
         }
@@ -38,9 +38,9 @@ impl TryFrom<Option<&str>> for Align {
         // inlined format args are not supported for `debug_assert` with edition 2018.
         #[allow(clippy::uninlined_format_args)]
         match from {
-            Some(alignment) if alignment == "<" => Ok(Align::Left),
-            Some(alignment) if alignment == ">" => Ok(Align::Right),
-            Some(alignment) if alignment == "^" => Ok(Align::Center),
+            Some("<") => Ok(Align::Left),
+            Some(">") => Ok(Align::Right),
+            Some("^") => Ok(Align::Center),
             Some(alignment) => {
                 debug_assert!(false, "Unknown Alignment: {}", alignment);
                 Err(())
@@ -94,7 +94,7 @@ pub type FormatStringPlaceholderData<'a> =
 
 pub type FormatStringSimple = FormatStringPlaceholderDataAnyPlaceholder<()>;
 
-impl<'a> FormatStringPlaceholderData<'a> {
+impl FormatStringPlaceholderData<'_> {
     pub fn width(&self, hunk_max_line_number_width: usize) -> (usize, usize) {
         // Only if Some(placeholder) is present will there be a number formatted
         // by this placeholder, if not width is also None.
@@ -246,7 +246,7 @@ impl CenterRightNumbers for String {
     }
 }
 
-impl<'a> CenterRightNumbers for &std::borrow::Cow<'a, str> {
+impl CenterRightNumbers for &std::borrow::Cow<'_, str> {
     fn center_right_space(&self, alignment: Align, width: usize) -> &'static str {
         self.as_ref().center_right_space(alignment, width)
     }

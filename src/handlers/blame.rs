@@ -14,7 +14,7 @@ use crate::format::{self, FormatStringSimple, Placeholder};
 use crate::format::{make_placeholder_regex, parse_line_number_format};
 use crate::paint::{self, BgShouldFill, StyleSectionSpecifier};
 use crate::style::Style;
-use crate::utils;
+use crate::utils::process;
 
 #[derive(Clone, Debug)]
 pub enum BlameLineNumbers {
@@ -24,7 +24,7 @@ pub enum BlameLineNumbers {
     Every(usize, FormatStringSimple),
 }
 
-impl<'a> StateMachine<'a> {
+impl StateMachine<'_> {
     /// If this is a line of git blame output then render it accordingly. If
     /// this is the first blame line, then set the syntax-highlighter language
     /// according to delta.default-language.
@@ -76,14 +76,9 @@ impl<'a> StateMachine<'a> {
                 )?;
 
                 // Emit syntax-highlighted code
-                if matches!(self.state, State::Unknown) {
-                    if let Some(lang) = utils::process::git_blame_filename_extension()
-                        .as_ref()
-                        .or(self.config.default_language.as_ref())
-                    {
-                        self.painter.set_syntax(Some(lang));
-                        self.painter.set_highlighter();
-                    }
+                if self.state == State::Unknown {
+                    self.painter.set_syntax(self.get_filename().as_deref());
+                    self.painter.set_highlighter();
                 }
                 self.state = State::Blame(key);
                 self.painter.syntax_highlight_and_paint_line(
@@ -96,6 +91,13 @@ impl<'a> StateMachine<'a> {
             }
         }
         Ok(handled_line)
+    }
+
+    fn get_filename(&self) -> Option<String> {
+        match &*process::calling_process() {
+            process::CallingProcess::GitBlame(command_line) => command_line.last_arg.clone(),
+            _ => None,
+        }
     }
 
     fn blame_metadata_style(
@@ -361,7 +363,7 @@ pub fn parse_blame_line_numbers(arg: &str) -> BlameLineNumbers {
 
     match f.fmt_type.as_str() {
         t if t.is_empty() || t == "every" => BlameLineNumbers::On(set_defaults(f.into_simple())),
-        t if t == "block" => BlameLineNumbers::PerBlock(set_defaults(f.into_simple())),
+        "block" => BlameLineNumbers::PerBlock(set_defaults(f.into_simple())),
         every_n if every_n.starts_with("every-") => {
             let n = every_n["every-".len()..]
                 .parse::<usize>()

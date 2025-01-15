@@ -1,13 +1,13 @@
 # Installation
 
 You can download an executable for your system:
-[Linux (glibc)](https://github.com/dandavison/delta/releases/download/0.15.0/delta-0.15.0-x86_64-unknown-linux-gnu.tar.gz)
+[Linux (glibc)](https://github.com/dandavison/delta/releases/download/0.18.2/delta-0.18.2-x86_64-unknown-linux-gnu.tar.gz)
 |
-[Linux (musl)](https://github.com/dandavison/delta/releases/download/0.15.0/delta-0.15.0-x86_64-unknown-linux-musl.tar.gz)
+[Linux (musl)](https://github.com/dandavison/delta/releases/download/0.18.2/delta-0.18.2-x86_64-unknown-linux-musl.tar.gz)
 |
-[MacOS](https://github.com/dandavison/delta/releases/download/0.15.0/delta-0.15.0-x86_64-apple-darwin.tar.gz)
+[MacOS](https://github.com/dandavison/delta/releases/download/0.18.2/delta-0.18.2-x86_64-apple-darwin.tar.gz)
 |
-[Windows](https://github.com/dandavison/delta/releases/download/0.15.0/delta-0.15.0-x86_64-pc-windows-msvc.zip)
+[Windows](https://github.com/dandavison/delta/releases/download/0.18.2/delta-0.18.2-x86_64-pc-windows-msvc.zip)
 |
 [All](https://github.com/dandavison/delta/releases)
 
@@ -17,7 +17,7 @@ Note that the package is often called `git-delta`, but the executable installed 
 
 <table>
   <tr>
-    <td><a href="https://archlinux.org/packages/community/x86_64/git-delta/">Arch Linux</a></td>
+    <td><a href="https://archlinux.org/packages/extra/x86_64/git-delta/">Arch Linux</a></td>
     <td><code>pacman -S git-delta</code></td>
   </tr>
   <tr>
@@ -53,7 +53,7 @@ Note that the package is often called `git-delta`, but the executable installed 
     <td><code>pkg_add delta</code></td>
   </tr>
   <tr>
-    <td><a href="https://software.opensuse.org/package/git-delta">openSUSE Tumbleweed</a></td>
+    <td><a href="https://software.opensuse.org/package/git-delta">openSUSE</a></td>
     <td><code>zypper install git-delta</code>
   </tr>
   <tr>
@@ -97,3 +97,5 @@ Users of older MacOS versions (e.g. 10.11 El Capitan) should install using Homeb
 Behind the scenes, delta uses [`less`](https://www.greenwoodsoftware.com/less/) for paging.
 It's important to have a reasonably recent version of less installed.
 On MacOS, install `less` from Homebrew. For Windows, see [Using Delta on Windows](./tips-and-tricks/using-delta-on-windows.md).
+
+If you use [`bat`](https://github.com/sharkdp/bat) and are running `bat cache --build` to install custom themes or language syntaxes then you should install the same version of bat as specified in the [`Cargo.toml`](https://github.com/dandavison/delta/blob/main/Cargo.toml) for the delta release you're using, otherwise delta will crash with a [memory error](https://github.com/dandavison/delta/issues/1712). The current version of delta does not work with bat v0.18.3 or prior versions.

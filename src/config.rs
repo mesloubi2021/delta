@@ -9,7 +9,7 @@ use syntect::parsing::SyntaxSet;
 
 use crate::ansi;
 use crate::cli;
-use crate::color;
+use crate::color::{self, ColorMode};
 use crate::delta::State;
 use crate::fatal;
 use crate::features::navigate;
@@ -31,6 +31,9 @@ use crate::wrapping::WrapConfig;
 
 pub const INLINE_SYMBOL_WIDTH_1: usize = 1;
 
+// Used if an invalid default-language was specified.
+pub const SYNTAX_FALLBACK_LANG: &str = "txt";
+
 #[cfg_attr(test, derive(Clone))]
 pub struct Config {
     pub available_terminal_width: usize,
@@ -49,7 +52,8 @@ pub struct Config {
     pub cwd_of_user_shell_process: Option<PathBuf>,
     pub cwd_relative_to_repo_root: Option<String>,
     pub decorations_width: cli::Width,
-    pub default_language: Option<String>,
+    pub default_language: String,
+    pub diff_args: String,
     pub diff_stat_align_width: usize,
     pub error_exit_code: i32,
     pub file_added_label: String,
@@ -74,10 +78,12 @@ pub struct Config {
     pub grep_output_type: Option<GrepType>,
     pub grep_separator_symbol: String,
     pub handle_merge_conflicts: bool,
+    pub hostname: Option<String>,
     pub hunk_header_file_style: Style,
     pub hunk_header_line_number_style: Style,
     pub hunk_header_style_include_file_path: HunkHeaderIncludeFilePath,
     pub hunk_header_style_include_line_number: HunkHeaderIncludeLineNumber,
+    pub hunk_header_style_include_code_fragment: HunkHeaderIncludeCodeFragment,
     pub hunk_header_style: Style,
     pub hunk_label: String,
     pub hyperlinks_commit_link_format: Option<String>,
@@ -97,6 +103,7 @@ pub struct Config {
     pub max_line_distance_for_naively_paired_lines: f64,
     pub max_line_distance: f64,
     pub max_line_length: usize,
+    pub max_syntax_length: usize,
     pub merge_conflict_begin_symbol: String,
     pub merge_conflict_ours_diff_header_style: Style,
     pub merge_conflict_theirs_diff_header_style: Style,
@@ -121,7 +128,6 @@ pub struct Config {
     pub show_themes: bool,
     pub side_by_side_data: side_by_side::SideBySideData,
     pub side_by_side: bool,
-    pub syntax_dummy_theme: SyntaxTheme,
     pub syntax_set: SyntaxSet,
     pub syntax_theme: Option<SyntaxTheme>,
     pub tab_cfg: utils::tabs::TabCfg,
@@ -147,6 +153,12 @@ pub enum HunkHeaderIncludeFilePath {
 
 #[cfg_attr(test, derive(Clone))]
 pub enum HunkHeaderIncludeLineNumber {
+    Yes,
+    No,
+}
+
+#[cfg_attr(test, derive(Clone))]
+pub enum HunkHeaderIncludeCodeFragment {
     Yes,
     No,
 }
@@ -203,7 +215,11 @@ impl From<cli::Opt> for Config {
             ));
         });
 
-        let blame_palette = make_blame_palette(opt.blame_palette, opt.computed.is_light_mode);
+        let blame_palette = make_blame_palette(opt.blame_palette, opt.computed.color_mode);
+
+        if blame_palette.is_empty() {
+            fatal("Option 'blame-palette' must not be empty.")
+        }
 
         let file_added_label = opt.file_added_label;
         let file_copied_label = opt.file_copied_label;
@@ -284,6 +300,7 @@ impl From<cli::Opt> for Config {
             cwd_relative_to_repo_root,
             decorations_width: opt.computed.decorations_width,
             default_language: opt.default_language,
+            diff_args: opt.diff_args,
             diff_stat_align_width: opt.diff_stat_align_width,
             error_exit_code: 2, // Use 2 for error because diff uses 0 and 1 for non-error.
             file_added_label,
@@ -310,6 +327,7 @@ impl From<cli::Opt> for Config {
             grep_output_type,
             grep_separator_symbol: opt.grep_separator_symbol,
             handle_merge_conflicts: !opt.raw,
+            hostname: opt.env.hostname,
             hunk_header_file_style: styles["hunk-header-file-style"],
             hunk_header_line_number_style: styles["hunk-header-line-number-style"],
             hunk_header_style: styles["hunk-header-style"],
@@ -330,6 +348,15 @@ impl From<cli::Opt> for Config {
                 HunkHeaderIncludeLineNumber::Yes
             } else {
                 HunkHeaderIncludeLineNumber::No
+            },
+            hunk_header_style_include_code_fragment: if opt
+                .hunk_header_style
+                .split(' ')
+                .any(|s| s == "omit-code-fragment")
+            {
+                HunkHeaderIncludeCodeFragment::No
+            } else {
+                HunkHeaderIncludeCodeFragment::Yes
             },
             hyperlinks: opt.hyperlinks,
             hyperlinks_commit_link_format: opt.hyperlinks_commit_link_format,
@@ -370,6 +397,7 @@ impl From<cli::Opt> for Config {
             } else {
                 opt.max_line_length
             },
+            max_syntax_length: opt.max_syntax_length,
             merge_conflict_begin_symbol: opt.merge_conflict_begin_symbol,
             merge_conflict_ours_diff_header_style: styles["merge-conflict-ours-diff-header-style"],
             merge_conflict_theirs_diff_header_style: styles
@@ -398,7 +426,6 @@ impl From<cli::Opt> for Config {
             side_by_side: opt.side_by_side && !handlers::hunk::is_word_diff(),
             side_by_side_data,
             styles_map,
-            syntax_dummy_theme: SyntaxTheme::default(),
             syntax_set: opt.computed.syntax_set,
             syntax_theme: opt.computed.syntax_theme,
             tab_cfg: utils::tabs::TabCfg::new(opt.tab_width),
@@ -412,17 +439,17 @@ impl From<cli::Opt> for Config {
     }
 }
 
-fn make_blame_palette(blame_palette: Option<String>, is_light_mode: bool) -> Vec<String> {
-    match (blame_palette, is_light_mode) {
+fn make_blame_palette(blame_palette: Option<String>, mode: ColorMode) -> Vec<String> {
+    match (blame_palette, mode) {
         (Some(string), _) => string
             .split_whitespace()
             .map(|s| s.to_owned())
             .collect::<Vec<String>>(),
-        (None, true) => color::LIGHT_THEME_BLAME_PALETTE
+        (None, ColorMode::Light) => color::LIGHT_THEME_BLAME_PALETTE
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<String>>(),
-        (None, false) => color::DARK_THEME_BLAME_PALETTE
+        (None, ColorMode::Dark) => color::DARK_THEME_BLAME_PALETTE
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<String>>(),
@@ -468,9 +495,9 @@ pub mod tests {
             Some(git_config_contents),
             Some(git_config_path),
         );
-        assert_eq!(config.true_color, false);
+        assert!(!config.true_color);
         assert_eq!(config.decorations_width, cli::Width::Fixed(100));
-        assert_eq!(config.background_color_extends_to_terminal_width, true);
+        assert!(config.background_color_extends_to_terminal_width);
         assert_eq!(config.inspect_raw_lines, cli::InspectRawLines::True);
         assert_eq!(config.paging_mode, PagingMode::Never);
         assert!(config.syntax_theme.is_none());

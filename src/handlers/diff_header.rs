@@ -22,7 +22,7 @@ pub enum FileEvent {
     NoEvent,
 }
 
-impl<'a> StateMachine<'a> {
+impl StateMachine<'_> {
     /// Check for the old mode|new mode lines and cache their info for later use.
     pub fn handle_diff_header_mode_line(&mut self) -> std::io::Result<bool> {
         let mut handled_line = false;
@@ -73,7 +73,7 @@ impl<'a> StateMachine<'a> {
     #[inline]
     fn test_diff_header_minus_line(&self) -> bool {
         (matches!(self.state, State::DiffHeader(_)) || self.source == Source::DiffUnified)
-            && (self.line.starts_with("--- ")
+            && ((self.line.starts_with("--- ") && self.minus_line_counter.three_dashes_expected())
                 || self.line.starts_with("rename from ")
                 || self.line.starts_with("copy from "))
     }
@@ -84,21 +84,20 @@ impl<'a> StateMachine<'a> {
             return Ok(false);
         }
 
-        let (path_or_mode, file_event) =
+        let (mut path_or_mode, file_event) =
             parse_diff_header_line(&self.line, self.source == Source::GitDiff);
 
-        self.minus_file = utils::path::relativize_path_maybe(&path_or_mode, self.config)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or(path_or_mode);
+        utils::path::relativize_path_maybe(&mut path_or_mode, self.config);
+        self.minus_file = path_or_mode;
         self.minus_file_event = file_event;
 
         if self.source == Source::DiffUnified {
             self.state = State::DiffHeader(DiffType::Unified);
             self.painter
-                .set_syntax(get_file_extension_from_marker_line(&self.line));
+                .set_syntax(get_filename_from_marker_line(&self.line));
         } else {
             self.painter
-                .set_syntax(get_file_extension_from_diff_header_line_file_path(
+                .set_syntax(get_filename_from_diff_header_line_file_path(
                     &self.minus_file,
                 ));
         }
@@ -121,15 +120,14 @@ impl<'a> StateMachine<'a> {
             return Ok(false);
         }
         let mut handled_line = false;
-        let (path_or_mode, file_event) =
+        let (mut path_or_mode, file_event) =
             parse_diff_header_line(&self.line, self.source == Source::GitDiff);
 
-        self.plus_file = utils::path::relativize_path_maybe(&path_or_mode, self.config)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or(path_or_mode);
+        utils::path::relativize_path_maybe(&mut path_or_mode, self.config);
+        self.plus_file = path_or_mode;
         self.plus_file_event = file_event;
         self.painter
-            .set_syntax(get_file_extension_from_diff_header_line_file_path(
+            .set_syntax(get_filename_from_diff_header_line_file_path(
                 &self.plus_file,
             ));
         self.current_file_pair = Some((self.minus_file.clone(), self.plus_file.clone()));
@@ -142,7 +140,8 @@ impl<'a> StateMachine<'a> {
         {
             self.painter.emit()?;
             self._handle_diff_header_header_line(self.source == Source::DiffUnified)?;
-            self.handled_diff_header_header_line_file_pair = self.current_file_pair.clone();
+            self.handled_diff_header_header_line_file_pair
+                .clone_from(&self.current_file_pair);
         }
         Ok(handled_line)
     }
@@ -255,7 +254,8 @@ impl<'a> StateMachine<'a> {
             && self.handled_diff_header_header_line_file_pair != self.current_file_pair
         {
             self._handle_diff_header_header_line(self.source == Source::DiffUnified)?;
-            self.handled_diff_header_header_line_file_pair = self.current_file_pair.clone();
+            self.handled_diff_header_header_line_file_pair
+                .clone_from(&self.current_file_pair);
             Ok(())
         } else {
             Ok(())
@@ -300,30 +300,23 @@ pub fn write_generic_diff_header_header_line(
 
 #[allow(clippy::tabs_in_doc_comments)]
 /// Given input like
-/// "--- one.rs	2019-11-20 06:16:08.000000000 +0100"
-/// Return "rs"
-fn get_file_extension_from_marker_line(line: &str) -> Option<&str> {
+/// "--- a/zero/one.rs	2019-11-20 06:16:08.000000000 +0100"
+/// Return "one.rs"
+fn get_filename_from_marker_line(line: &str) -> Option<&str> {
     line.split('\t')
         .next()
         .and_then(|column| column.split(' ').nth(1))
-        .and_then(|file| file.split('.').last())
+        .and_then(get_filename_from_diff_header_line_file_path)
 }
 
-fn get_file_extension_from_diff_header_line_file_path(path: &str) -> Option<&str> {
-    if path.is_empty() || path == "/dev/null" {
-        None
-    } else {
-        get_extension(path).map(|ex| ex.trim())
-    }
-}
-
-/// Attempt to parse input as a file path and return extension as a &str.
-pub fn get_extension(s: &str) -> Option<&str> {
-    let path = Path::new(s);
-    path.extension()
-        .and_then(|e| e.to_str())
-        // E.g. 'Makefile' is the file name and also the extension
-        .or_else(|| path.file_name().and_then(|s| s.to_str()))
+fn get_filename_from_diff_header_line_file_path(path: &str) -> Option<&str> {
+    Path::new(path).file_name().and_then(|filename| {
+        if path != "/dev/null" {
+            filename.to_str()
+        } else {
+            None
+        }
+    })
 }
 
 fn parse_diff_header_line(line: &str, git_diff_name: bool) -> (String, FileEvent) {
@@ -357,7 +350,7 @@ fn parse_diff_header_line(line: &str, git_diff_name: bool) -> (String, FileEvent
 
 /// Given input like "diff --git a/src/my file.rs b/src/my file.rs"
 /// return Some("src/my file.rs")
-fn get_repeated_file_path_from_diff_line(line: &str) -> Option<String> {
+pub fn get_repeated_file_path_from_diff_line(line: &str) -> Option<String> {
     if let Some(line) = line.strip_prefix("diff --git ") {
         let line: Vec<&str> = line.graphemes(true).collect();
         let midpoint = line.len() / 2;
@@ -381,7 +374,11 @@ fn remove_surrounding_quotes(path: &str) -> &str {
     }
 }
 
-fn _parse_file_path(s: &str, git_diff_name: bool) -> String {
+fn _parse_file_path(path: &str, git_diff_name: bool) -> String {
+    // When git config 'core.quotepath = true' (the default), and `path` contains
+    // non-ASCII characters, a backslash, or a quote; then it is quoted, so remove
+    // these quotes. Characters may also be escaped, but these are left as-is.
+    let path = remove_surrounding_quotes(path);
     // It appears that, if the file name contains a space, git appends a tab
     // character in the diff metadata lines, e.g.
     // $ git diff --no-index "a b" "c d" | cat -A
@@ -389,15 +386,13 @@ fn _parse_file_path(s: &str, git_diff_name: bool) -> String {
     // index·d00491f..0cfbf08·100644␊
     // ---·a/a·b├──┤␊
     // +++·b/c·d├──┤␊
-    let path = match s.strip_suffix('\t').unwrap_or(s) {
-        path if path == "/dev/null" => "/dev/null",
+    match path.strip_suffix('\t').unwrap_or(path) {
+        "/dev/null" => "/dev/null",
         path if git_diff_name && DIFF_PREFIXES.iter().any(|s| path.starts_with(s)) => &path[2..],
         path if git_diff_name => path,
         path => path.split('\t').next().unwrap_or(""),
-    };
-    // When a path contains non-ASCII characters, a backslash, or a quote then it is quoted,
-    // so remove these quotes. Characters may also be escaped, but these are left as-is.
-    remove_surrounding_quotes(path).to_string()
+    }
+    .to_string()
 }
 
 pub fn get_file_change_description_from_file_paths(
@@ -475,53 +470,53 @@ pub fn get_file_change_description_from_file_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::integration_test_utils::{make_config_from_args, DeltaTest};
+    use insta::assert_snapshot;
 
     #[test]
-    fn test_get_file_extension_from_marker_line() {
+    fn test_get_filename_from_marker_line() {
         assert_eq!(
-            get_file_extension_from_marker_line(
-                "--- src/one.rs	2019-11-20 06:47:56.000000000 +0100"
-            ),
-            Some("rs")
+            get_filename_from_marker_line("--- src/one.rs	2019-11-20 06:47:56.000000000 +0100"),
+            Some("one.rs")
         );
     }
 
     #[test]
-    fn test_get_file_extension_from_diff_header_line() {
+    fn test_get_filename_from_diff_header_line() {
         assert_eq!(
-            get_file_extension_from_diff_header_line_file_path("a/src/parse.rs"),
-            Some("rs")
+            get_filename_from_diff_header_line_file_path("a/src/parse.rs"),
+            Some("parse.rs")
         );
         assert_eq!(
-            get_file_extension_from_diff_header_line_file_path("b/src/pa rse.rs"),
-            Some("rs")
+            get_filename_from_diff_header_line_file_path("b/src/pa rse.rs"),
+            Some("pa rse.rs")
         );
         assert_eq!(
-            get_file_extension_from_diff_header_line_file_path("src/pa rse.rs"),
-            Some("rs")
+            get_filename_from_diff_header_line_file_path("src/pa rse.rs"),
+            Some("pa rse.rs")
         );
         assert_eq!(
-            get_file_extension_from_diff_header_line_file_path("wat hello.rs"),
-            Some("rs")
+            get_filename_from_diff_header_line_file_path("wat hello.rs"),
+            Some("wat hello.rs")
         );
         assert_eq!(
-            get_file_extension_from_diff_header_line_file_path("/dev/null"),
+            get_filename_from_diff_header_line_file_path("/dev/null"),
             None
         );
         assert_eq!(
-            get_file_extension_from_diff_header_line_file_path("Dockerfile"),
+            get_filename_from_diff_header_line_file_path("Dockerfile"),
             Some("Dockerfile")
         );
         assert_eq!(
-            get_file_extension_from_diff_header_line_file_path("Makefile"),
+            get_filename_from_diff_header_line_file_path("Makefile"),
             Some("Makefile")
         );
         assert_eq!(
-            get_file_extension_from_diff_header_line_file_path("a/src/Makefile"),
+            get_filename_from_diff_header_line_file_path("a/src/Makefile"),
             Some("Makefile")
         );
         assert_eq!(
-            get_file_extension_from_diff_header_line_file_path("src/Makefile"),
+            get_filename_from_diff_header_line_file_path("src/Makefile"),
             Some("Makefile")
         );
     }
@@ -645,5 +640,233 @@ mod tests {
                 "diff --git a/.config/Code - Insiders/User/settings.json b/.config/Code - Insiders/User/settings.json"),
             Some(".config/Code - Insiders/User/settings.json".to_string())
         );
+        assert_eq!(
+            get_repeated_file_path_from_diff_line(r#"diff --git "a/quoted" "b/quoted""#),
+            Some("quoted".to_string())
+        );
+    }
+
+    pub const BIN_AND_TXT_FILE_ADDED: &str = "\
+diff --git a/BIN b/BIN
+new file mode 100644
+index 0000000..a5d0c46
+Binary files /dev/null and b/BIN differ
+diff --git a/TXT b/TXT
+new file mode 100644
+index 0000000..323fae0
+--- /dev/null
++++ b/TXT
+@@ -0,0 +1 @@
++plain text";
+
+    #[test]
+    fn test_diff_header_relative_paths() {
+        // rustfmt ignores the assert macro arguments, so do the setup outside
+        let mut cfg = make_config_from_args(&["--relative-paths", "-s"]);
+        cfg.cwd_relative_to_repo_root = Some("src/utils/".into());
+        let result = DeltaTest::with_config(&cfg)
+            .with_input(BIN_AND_TXT_FILE_ADDED)
+            .output;
+        // convert windows '..\' to unix '../' paths
+        insta::with_settings!({filters => vec![(r"\.\.\\", "../")]}, {
+            assert_snapshot!(result, @r###"
+
+            added: ../../BIN (binary file)
+            ───────────────────────────────────────────
+
+            added: ../../TXT
+            ───────────────────────────────────────────
+
+            ───┐
+            1: │
+            ───┘
+            │    │                │  1 │plain text
+            "###)
+        });
+    }
+
+    pub const DIFF_AMBIGUOUS_HEADER_3X_MINUS: &str = r#"--- a.lua
++++ b.lua
+@@ -1,5 +1,4 @@
+ #!/usr/bin/env lua
+ 
+ print("Hello")
+--- World?
+ print("..")
+"#;
+    pub const DIFF_AMBIGUOUS_HEADER_3X_MINUS_LAST_LINE: &str = r#"--- c.lua
++++ d.lua
+@@ -1,4 +1,3 @@
+ #!/usr/bin/env lua
+ 
+ print("Hello")
+--- World?
+"#;
+
+    pub const DIFF_AMBIGUOUS_HEADER_MULTIPLE_HUNKS: &str = r#"--- e.lua	2024-08-04 20:50:27.257726606 +0200
++++ f.lua	2024-08-04 20:50:35.345795405 +0200
+@@ -3,3 +3,2 @@
+ print("Hello")
+--- World?
+ print("")
+@@ -7,2 +6,3 @@
+ print("")
++print("World")
+ print("")
+@@ -10,2 +10 @@
+ print("")
+--- End
+"#;
+
+    #[test]
+    fn test_diff_header_ambiguous_3x_minus() {
+        // check ansi output to ensure output is highlighted
+        let result = DeltaTest::with_args(&[])
+            .explain_ansi()
+            .with_input(DIFF_AMBIGUOUS_HEADER_3X_MINUS);
+
+        assert_snapshot!(result.output, @r###"
+        (normal)
+        (blue)a.lua ⟶   b.lua(normal)
+        (blue)───────────────────────────────────────────(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)1(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (203)#(231)!(203)/(231)usr(203)/(231)bin(203)/(231)env lua(normal)
+
+        (81)print(231)((186)"Hello"(231))(normal)
+        (normal 52)-- World?(normal)
+        (81)print(231)((186)".."(231))(normal)
+
+        "###);
+    }
+
+    #[test]
+    fn test_diff_header_ambiguous_3x_minus_concatenated() {
+        let result = DeltaTest::with_args(&[])
+            .explain_ansi()
+            .with_input(&format!(
+                "{}{}{}",
+                DIFF_AMBIGUOUS_HEADER_MULTIPLE_HUNKS,
+                DIFF_AMBIGUOUS_HEADER_3X_MINUS,
+                DIFF_AMBIGUOUS_HEADER_3X_MINUS_LAST_LINE
+            ));
+
+        assert_snapshot!(result.output, @r###"
+        (normal)
+        (blue)e.lua ⟶   f.lua(normal)
+        (blue)───────────────────────────────────────────(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)3(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (81)print(231)((186)"Hello"(231))(normal)
+        (normal 52)-- World?(normal)
+        (81)print(231)((186)""(231))(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)6(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (81)print(231)((186)""(231))(normal)
+        (81 22)print(231)((186)"World"(231))(normal)
+        (81)print(231)((186)""(231))(normal)
+
+        (blue)────(blue)┐(normal)
+        (blue)10(normal): (blue)│(normal)
+        (blue)────(blue)┘(normal)
+        (81)print(231)((186)""(231))(normal)
+        (normal 52)-- End(normal)
+
+        (blue)a.lua ⟶   b.lua(normal)
+        (blue)───────────────────────────────────────────(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)1(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (203)#(231)!(203)/(231)usr(203)/(231)bin(203)/(231)env lua(normal)
+
+        (81)print(231)((186)"Hello"(231))(normal)
+        (normal 52)-- World?(normal)
+        (81)print(231)((186)".."(231))(normal)
+
+        (blue)c.lua ⟶   d.lua(normal)
+        (blue)───────────────────────────────────────────(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)1(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (203)#(231)!(203)/(231)usr(203)/(231)bin(203)/(231)env lua(normal)
+
+        (81)print(231)((186)"Hello"(231))(normal)
+        (normal 52)-- World?(normal)
+        "###);
+    }
+
+    #[test]
+    fn test_diff_header_ambiguous_3x_minus_extra_and_concatenated() {
+        let result = DeltaTest::with_args(&[])
+            .explain_ansi()
+            .with_input(&format!(
+                "extra 1\n\n{}\nextra 2\n{}\nextra 3\n{}",
+                DIFF_AMBIGUOUS_HEADER_MULTIPLE_HUNKS,
+                DIFF_AMBIGUOUS_HEADER_3X_MINUS,
+                DIFF_AMBIGUOUS_HEADER_3X_MINUS_LAST_LINE
+            ));
+
+        assert_snapshot!(result.output, @r###"
+        (normal)extra 1
+
+
+        (blue)e.lua ⟶   f.lua(normal)
+        (blue)───────────────────────────────────────────(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)3(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (81)print(231)((186)"Hello"(231))(normal)
+        (normal 52)-- World?(normal)
+        (81)print(231)((186)""(231))(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)6(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (81)print(231)((186)""(231))(normal)
+        (81 22)print(231)((186)"World"(231))(normal)
+        (81)print(231)((186)""(231))(normal)
+
+        (blue)────(blue)┐(normal)
+        (blue)10(normal): (blue)│(normal)
+        (blue)────(blue)┘(normal)
+        (81)print(231)((186)""(231))(normal)
+        (normal 52)-- End(normal)
+
+        extra 2
+
+        (blue)a.lua ⟶   b.lua(normal)
+        (blue)───────────────────────────────────────────(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)1(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (203)#(231)!(203)/(231)usr(203)/(231)bin(203)/(231)env lua(normal)
+
+        (81)print(231)((186)"Hello"(231))(normal)
+        (normal 52)-- World?(normal)
+        (81)print(231)((186)".."(231))(normal)
+
+        extra 3
+
+        (blue)c.lua ⟶   d.lua(normal)
+        (blue)───────────────────────────────────────────(normal)
+
+        (blue)───(blue)┐(normal)
+        (blue)1(normal): (blue)│(normal)
+        (blue)───(blue)┘(normal)
+        (203)#(231)!(203)/(231)usr(203)/(231)bin(203)/(231)env lua(normal)
+
+        (81)print(231)((186)"Hello"(231))(normal)
+        (normal 52)-- World?(normal)
+        "###);
     }
 }

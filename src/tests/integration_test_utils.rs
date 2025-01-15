@@ -6,7 +6,7 @@ use std::io::{BufReader, Write};
 use std::path::Path;
 
 use bytelines::ByteLines;
-use itertools;
+use itertools::Itertools;
 
 use crate::ansi;
 use crate::cli;
@@ -66,7 +66,7 @@ fn _make_options_from_args_and_git_config(
             None
         }
     };
-    cli::Opt::from_iter_and_git_config(env, args, git_config)
+    cli::Opt::from_iter_and_git_config(&env, args, git_config)
 }
 
 pub fn make_options_from_args(args: &[&str]) -> cli::Opt {
@@ -262,6 +262,10 @@ impl DeltaTestOutput {
 
     pub fn expect_after_header(self, expected: &str) -> Self {
         self.expect_after_skip(crate::config::HEADER_LEN, expected)
+    }
+
+    pub fn skip_header(self) -> String {
+        self.output.lines().skip(config::HEADER_LEN).join("\n")
     }
 
     pub fn expect_contains(self, expected: &str) -> Self {

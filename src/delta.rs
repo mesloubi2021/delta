@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::config::GrepType;
 use crate::features;
 use crate::handlers::grep;
-use crate::handlers::hunk_header::ParsedHunkHeader;
+use crate::handlers::hunk_header::{AmbiguousDiffMinusCounter, ParsedHunkHeader};
 use crate::handlers::{self, merge_conflict};
 use crate::paint::Painter;
 use crate::style::DecorationStyle;
@@ -111,6 +111,7 @@ pub struct StateMachine<'a> {
     pub current_file_pair: Option<(String, String)>,
     pub handled_diff_header_header_line_file_pair: Option<(String, String)>,
     pub blame_key_colors: HashMap<String, String>,
+    pub minus_line_counter: AmbiguousDiffMinusCounter,
 }
 
 pub fn delta<I>(lines: ByteLines<I>, writer: &mut dyn Write, config: &Config) -> std::io::Result<()>
@@ -138,6 +139,7 @@ impl<'a> StateMachine<'a> {
             painter: Painter::new(writer, config),
             config,
             blame_key_colors: HashMap::new(),
+            minus_line_counter: AmbiguousDiffMinusCounter::not_needed(),
         }
     }
 
@@ -150,6 +152,11 @@ impl<'a> StateMachine<'a> {
 
             if self.source == Source::Unknown {
                 self.source = detect_source(&self.line);
+                // Handle (rare) plain `diff -u file1 file2` header. Done here to avoid having
+                // to introduce and handle a Source::DiffUnifiedAmbiguous variant everywhere.
+                if self.line.starts_with("--- ") {
+                    self.minus_line_counter = AmbiguousDiffMinusCounter::prepare_to_count();
+                }
             }
 
             // Every method named handle_* must return std::io::Result<bool>.
@@ -192,7 +199,7 @@ impl<'a> StateMachine<'a> {
                     self.config.max_line_length,
                 );
                 self.raw_line = raw_line[..truncated_len].to_string();
-                self.line = self.raw_line.clone();
+                self.line.clone_from(&self.raw_line);
             }
         }
     }

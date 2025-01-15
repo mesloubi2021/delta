@@ -40,7 +40,7 @@ fn compute_is_word_diff() -> bool {
     }
 }
 
-impl<'a> StateMachine<'a> {
+impl StateMachine<'_> {
     #[inline]
     fn test_hunk_line(&self) -> bool {
         matches!(
@@ -89,6 +89,7 @@ impl<'a> StateMachine<'a> {
                 let line = prepare(&self.line, n_parents, self.config);
                 let state = HunkMinus(diff_type, raw_line);
                 self.painter.minus_lines.push((line, state.clone()));
+                self.minus_line_counter.count_line();
                 state
             }
             Some(HunkPlus(diff_type, raw_line)) => {
@@ -111,6 +112,7 @@ impl<'a> StateMachine<'a> {
                 let line = prepare(&self.line, n_parents, self.config);
                 let state = State::HunkZero(diff_type, raw_line);
                 self.painter.paint_zero_line(&line, state.clone());
+                self.minus_line_counter.count_line();
                 state
             }
             _ => {
